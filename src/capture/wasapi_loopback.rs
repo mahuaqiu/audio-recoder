@@ -11,9 +11,7 @@ pub fn record_speaker(
     config: &RecordConfig,
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
-    use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
-    use windows::Win32::Foundation::*;
 
     unsafe {
         // 初始化 COM
@@ -135,22 +133,22 @@ unsafe fn wasapi_loopback_thread(
                 let mut flags = 0u32;
 
                 capture_client
-                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, std::ptr::null_mut(), std::ptr::null_mut())
+                    .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None)
                     .map_err(|e| format!("获取缓冲区失败: {e}"))?;
 
                 if num_frames > 0 && !data_ptr.is_null() {
                     let samples = match sample_fmt {
                         crate::capture::SampleFmt::S16 => {
                             let ptr = data_ptr as *const i16;
-                            (0..num_frames).map(|i| ptr[i as usize] as f64).collect()
+                            (0..num_frames).map(|i| ptr.add(i as usize).read() as f64).collect()
                         }
                         crate::capture::SampleFmt::S32 => {
                             let ptr = data_ptr as *const i32;
-                            (0..num_frames).map(|i| ptr[i as usize] as f64).collect()
+                            (0..num_frames).map(|i| ptr.add(i as usize).read() as f64).collect()
                         }
                         crate::capture::SampleFmt::F32 => {
                             let ptr = data_ptr as *const f32;
-                            (0..num_frames).map(|i| ptr[i as usize] as f64).collect()
+                            (0..num_frames).map(|i| ptr.add(i as usize).read() as f64).collect()
                         }
                     };
 
