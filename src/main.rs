@@ -3,6 +3,7 @@ mod capture;
 use capture::{RecordConfig, SampleFmt, Source};
 use std::sync::{mpsc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
+use std::ffi::OsString;
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -38,7 +39,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
     );
 
     // 创建 channel 用于音频数据传输
-    let (tx, rx) = mpsc::sync_channel::<Vec<f64>>(8);
+    let (tx, rx) = mpsc::channel();
 
     // 启动录制
     let stop_handle = match config.source {
@@ -139,7 +140,8 @@ fn parse_args() -> Result<RecordConfig, String> {
     while let Some(arg) = parser.next().map_err(|e| format!("参数解析错误: {e}"))? {
         match arg {
             Short('s') | Long("source") => {
-                let val: String = parser.value().map_err(|e| format!("--source 需要参数: {e}"))?;
+                let val: OsString = parser.value().map_err(|e| format!("--source 需要参数: {e}"))?;
+                let val = val.to_string_lossy().into_owned();
                 config.source = match val.as_str() {
                     "microphone" | "mic" => Source::Microphone,
                     "speaker" | "spk" => Source::Speaker,
@@ -147,27 +149,31 @@ fn parse_args() -> Result<RecordConfig, String> {
                 };
             }
             Short('r') | Long("sample-rate") => {
-                let val: String = parser.value().map_err(|e| format!("--sample-rate 需要参数: {e}"))?;
+                let val: OsString = parser.value().map_err(|e| format!("--sample-rate 需要参数: {e}"))?;
+                let val = val.to_string_lossy().into_owned();
                 config.sample_rate = val.parse().map_err(|_| format!("无效的采样率: {val}"))?;
             }
             Short('f') | Long("sample-fmt") => {
-                let val: String = parser.value().map_err(|e| format!("--sample-fmt 需要参数: {e}"))?;
+                let val: OsString = parser.value().map_err(|e| format!("--sample-fmt 需要参数: {e}"))?;
+                let val = val.to_string_lossy().into_owned();
                 config.sample_fmt = SampleFmt::from_str(&val)
                     .ok_or_else(|| format!("无效的采样格式: {val}，支持: s16, s32, f32"))?;
             }
             Short('d') | Long("duration") => {
-                let val: String = parser.value().map_err(|e| format!("--duration 需要参数: {e}"))?;
+                let val: OsString = parser.value().map_err(|e| format!("--duration 需要参数: {e}"))?;
+                let val = val.to_string_lossy().into_owned();
                 config.duration_secs = val.parse().map_err(|_| format!("无效的录制时长: {val}"))?;
             }
             Short('o') | Long("output") => {
-                let val: String = parser.value().map_err(|e| format!("--output 需要参数: {e}"))?;
+                let val: OsString = parser.value().map_err(|e| format!("--output 需要参数: {e}"))?;
+                let val = val.to_string_lossy().into_owned();
                 config.output_path = val;
             }
             Short('h') | Long("help") => {
                 print_usage();
                 std::process::exit(0);
             }
-            _ => return Err(format!("未知参数: {arg}")),
+            _ => return Err(format!("未知参数: {:?}", arg)),
         }
     }
 

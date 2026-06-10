@@ -3,10 +3,21 @@ mod microphone;
 #[cfg(target_os = "windows")]
 mod wasapi_loopback;
 
+#[cfg(target_os = "macos")]
+mod macos_speaker;
+
 pub use microphone::record_microphone;
 
 #[cfg(target_os = "windows")]
 pub use wasapi_loopback::record_speaker;
+
+#[cfg(target_os = "macos")]
+pub use macos_speaker::record_speaker;
+
+/// 录制停止句柄，drop 时停止录制
+/// 录制停止句柄，drop 时停止录制
+#[allow(dead_code)]
+pub struct StopHandle(pub Option<cpal::Stream>);
 
 /// 音频源类型
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,7 +74,6 @@ impl SampleFmt {
         }
     }
 
-    /// 转换为 hound 的采样格式
     pub fn to_hound_sample_format(&self) -> hound::SampleFormat {
         match self {
             SampleFmt::S16 | SampleFmt::S32 => hound::SampleFormat::Int,
@@ -71,7 +81,6 @@ impl SampleFmt {
         }
     }
 
-    /// hound 中每个采样的位数
     pub fn bits_per_sample(&self) -> u16 {
         match self {
             SampleFmt::S16 => 16,

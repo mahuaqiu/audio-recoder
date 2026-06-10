@@ -1,10 +1,7 @@
 use crate::capture::{RecordConfig, SampleFmt};
+use crate::capture::StopHandle;
+use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
 use std::sync::mpsc;
-
-/// 录制停止句柄，drop 时停止录制
-pub struct StopHandle {
-    _stream: cpal::Stream,
-}
 
 /// 使用 cpal 录制麦克风音频
 /// 采样数据通过 tx 发送，返回停止句柄
@@ -81,7 +78,7 @@ pub fn record_microphone(
 
     stream.play().map_err(|e| format!("启动音频流失败: {e}"))?;
 
-    Ok(StopHandle { _stream: stream })
+    Ok(StopHandle(Some(stream)))
 }
 
 fn sample_fmt_matches(cpal_fmt: cpal::SampleFormat, expected: SampleFmt) -> bool {
@@ -89,6 +86,6 @@ fn sample_fmt_matches(cpal_fmt: cpal::SampleFormat, expected: SampleFmt) -> bool
         (cpal_fmt, expected),
         (cpal::SampleFormat::I16, SampleFmt::S16)
             | (cpal::SampleFormat::I32, SampleFmt::S32)
-            | (cpal::SampleFormat::F32, SampleFmt::F32)
+    | (cpal::SampleFormat::F32, SampleFmt::F32)
     )
 }
