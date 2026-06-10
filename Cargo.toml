@@ -17,6 +17,10 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
 ] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "7", features = ["macos_13_0"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+
 [profile.release]
 opt-level = "z"
 lto = true

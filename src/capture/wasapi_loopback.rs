@@ -1,11 +1,10 @@
-use crate::capture::RecordConfig;
-use std::sync::mpsc;
+//! Windows 扬声器录制 - 使用 WASAPI loopback 捕获系统音频
 
-/// 录制停止句柄
-pub struct StopHandle {
-    _thread: Option<std::thread::JoinHandle<()>>,
-    stop_tx: std::sync::mpsc::Sender<()>,
-}
+use crate::capture::{RecordConfig, StopHandle};
+use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 /// 使用 WASAPI loopback 录制扬声器音频（仅 Windows）
 pub fn record_speaker(
@@ -23,29 +22,35 @@ pub fn record_speaker(
             .map_err(|e| format!("COM 初始化失败: {e}"))?;
     }
 
+    // 创建停止标志
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag_clone = stop_flag.clone();
+
     let sample_rate = config.sample_rate;
     let sample_fmt = config.sample_fmt;
+    let tx_clone = tx.clone();
 
-    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-
-    let thread = std::thread::spawn(move || {
-        let result = unsafe { wasapi_loopback_thread(sample_rate, sample_fmt, tx, stop_rx) };
+    // 在新线程中运行 WASAPI 录制
+    thread::spawn(move || {
+        let result = unsafe {
+            wasapi_loopback_thread(sample_rate, sample_fmt, tx_clone, stop_flag_clone)
+        };
         if let Err(e) = result {
             eprintln!("WASAPI loopback 录制错误: {e}");
         }
     });
 
-    Ok(StopHandle {
-        _thread: Some(thread),
-        stop_tx,
-    })
+    eprintln!("正在录制系统音频 (WASAPI loopback)...");
+
+    // 返回带有停止标志的 StopHandle
+    Ok(StopHandle::new_speaker(stop_flag))
 }
 
 unsafe fn wasapi_loopback_thread(
     sample_rate: u32,
     sample_fmt: crate::capture::SampleFmt,
     tx: mpsc::Sender<Vec<f64>>,
-    stop_rx: std::sync::mpsc::Receiver<()>,
+    stop_flag: Arc<AtomicBool>,
 ) -> Result<(), String> {
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
@@ -118,14 +123,7 @@ unsafe fn wasapi_loopback_thread(
         .map_err(|e| format!("启动音频捕获失败: {e}"))?;
 
     // 录制循环
-    let mut running = true;
-    while running {
-        // 检查是否收到停止信号
-        if stop_rx.try_recv().is_ok() {
-            running = false;
-            break;
-        }
-
+    while !stop_flag.load(Ordering::Relaxed) {
         unsafe {
             let mut packet_size = capture_client
                 .GetNextPacketSize()

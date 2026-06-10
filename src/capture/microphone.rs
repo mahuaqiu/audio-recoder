@@ -78,7 +78,7 @@ pub fn record_microphone(
 
     stream.play().map_err(|e| format!("启动音频流失败: {e}"))?;
 
-    Ok(StopHandle(Some(stream)))
+    Ok(StopHandle::new_microphone(stream))
 }
 
 fn sample_fmt_matches(cpal_fmt: cpal::SampleFormat, expected: SampleFmt) -> bool {
@@ -86,6 +86,6 @@ fn sample_fmt_matches(cpal_fmt: cpal::SampleFormat, expected: SampleFmt) -> bool
         (cpal_fmt, expected),
         (cpal::SampleFormat::I16, SampleFmt::S16)
             | (cpal::SampleFormat::I32, SampleFmt::S32)
-    | (cpal::SampleFormat::F32, SampleFmt::F32)
+            | (cpal::SampleFormat::F32, SampleFmt::F32)
     )
 }

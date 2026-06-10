@@ -14,10 +14,48 @@ pub use wasapi_loopback::record_speaker;
 #[cfg(target_os = "macos")]
 pub use macos_speaker::record_speaker;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 /// 录制停止句柄，drop 时停止录制
-/// 录制停止句柄，drop 时停止录制
-#[allow(dead_code)]
-pub struct StopHandle(pub Option<cpal::Stream>);
+pub struct StopHandle {
+    /// cpal 音频流，用于麦克风录制
+    stream: Option<cpal::Stream>,
+    /// 停止标志，用于扬声器录制
+    stop_flag: Option<Arc<AtomicBool>>,
+}
+
+impl StopHandle {
+    /// 创建麦克风录制的停止句柄
+    pub fn new_microphone(stream: cpal::Stream) -> Self {
+        Self {
+            stream: Some(stream),
+            stop_flag: None,
+        }
+    }
+
+    /// 创建扬声器录制的停止句柄
+    pub fn new_speaker(stop_flag: Arc<AtomicBool>) -> Self {
+        Self {
+            stream: None,
+            stop_flag: Some(stop_flag),
+        }
+    }
+}
+
+impl Drop for StopHandle {
+    fn drop(&mut self) {
+        // 1. 如��有 cpal::Stream，drop 会自动停止音频流（麦克风）
+        if self.stream.is_some() {
+            self.stream = None; // 这会 drop stream
+        }
+        
+        // 2. 如果有停止标志，设置它来通知录制线程（扬声器）
+        if let Some(flag) = self.stop_flag.take() {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+}
 
 /// 音频源类型
 #[derive(Debug, Clone, Copy, PartialEq)]
