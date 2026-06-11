@@ -89,7 +89,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
     // 启动 WAV 写入线程
     let output_path = config.output_path.clone();
     let writer_thread = std::thread::spawn(move || {
-        wav_writer_loop(rx, &output_path, actual_sample_rate, actual_sample_fmt, target_sample_rate, target_sample_fmt)
+        wav_writer_loop(rx, &output_path, actual_sample_rate, target_sample_rate, target_sample_fmt)
     });
 
     // 前台模式：阻塞等待录制完成
@@ -179,7 +179,6 @@ fn wav_writer_loop(
     rx: mpsc::Receiver<Vec<f64>>,
     output_path: &str,
     actual_rate: u32,
-    actual_fmt: SampleFmt,
     target_rate: u32,
     target_fmt: SampleFmt,
 ) -> Result<(), String> {

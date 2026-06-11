@@ -58,7 +58,7 @@ pub fn record_speaker(
 }
 
 /// 查询默认音频渲染设备的混音格式
-unsafe fn query_device_mix_format() -> Result<(u32, SampleFmt, WAVEFORMATEX), String> {
+unsafe fn query_device_mix_format() -> Result<(u32, SampleFmt, windows::Win32::Media::Audio::WAVEFORMATEX), String> {
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
