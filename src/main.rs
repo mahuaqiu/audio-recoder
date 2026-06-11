@@ -205,13 +205,13 @@ fn wav_writer_loop(
         match target_fmt {
             SampleFmt::S16 => {
                 for s in &resampled {
-                    let val = (*s).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                    let val = (*s * 32767.0).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
                     writer.write_sample(val).map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
             SampleFmt::S32 => {
                 for s in &resampled {
-                    let val = (*s).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                    let val = (*s * 2147483647.0).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
                     writer.write_sample(val).map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }

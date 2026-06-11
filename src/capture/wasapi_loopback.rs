@@ -18,17 +18,8 @@ pub fn record_speaker(
     _config: &RecordConfig,
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
-    use windows::Win32::System::Com::*;
-
     // 创建通道用于传递初始化结果
     let (init_tx, init_rx) = mpsc::channel();
-
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-        if hr.is_err() {
-            // COM 可能已经初始化过了
-        }
-    }
 
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = stop_flag.clone();
@@ -37,11 +28,25 @@ pub fn record_speaker(
     eprintln!("正在录制系统音频 (WASAPI loopback)...");
 
     thread::spawn(move || {
+        // 在子线程中初始化 COM（STA 模式，WASAPI loopback 推荐）
+        unsafe {
+            use windows::Win32::System::Com::*;
+            let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            if hr.is_err() {
+                // COM 可能已经初始化过了，忽略
+            }
+        }
+
         // 用 catch_unwind 捕获子线程的 panic
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             unsafe { wasapi_loopback_thread(tx_clone, stop_flag_clone) }
         }));
-        
+
+        // 子线程结束后释放 COM
+        unsafe {
+            windows::Win32::System::Com::CoUninitialize();
+        }
+
         match result {
             Ok(inner) => {
                 match inner {
@@ -113,9 +118,21 @@ unsafe fn wasapi_loopback_thread(
 
     // WAVE_FORMAT_EXTENSIBLE (0xFFFE = 65534) 是 Windows 音频引擎的标准格式
     // 需要根据 bits_per_sample 判断实际格式
-    let sample_fmt = if format_tag == 3 || (format_tag == 65534 && bits_per_sample == 32) {
-        // IEEE_FLOAT 或 EXTENSIBLE 32-bit → f32
+    let sample_fmt = if format_tag == 3 {
+        // IEEE_FLOAT → f32
         SampleFmt::F32
+    } else if format_tag == 65534 {
+        // WAVE_FORMAT_EXTENSIBLE，需要检查 SubFormat GUID
+        // 在 WAVEFORMATEXTENSIBLE 中，SubFormat 位于 offset 18（cbSize + wValidBitsPerSample 之后）
+        // IEEE_FLOAT GUID: {00000003-0000-0010-8000-00aa00389b71} (PCM 的 DATA1=1, FLOAT 的 DATA1=3)
+        // 简化判断：32bit EXTENSIBLE 默认按 f32 处理（Windows 音频引擎默认）
+        if bits_per_sample == 32 {
+            SampleFmt::F32
+        } else if bits_per_sample == 16 {
+            SampleFmt::S16
+        } else {
+            SampleFmt::S32
+        }
     } else if bits_per_sample == 16 {
         SampleFmt::S16
     } else {
@@ -165,19 +182,28 @@ unsafe fn wasapi_loopback_thread(
                     SampleFmt::S16 => {
                         let ptr = data_ptr as *const i16;
                         (0..num_frames)
-                            .map(|i| ptr.add((i as usize) * (num_channels as usize)).read() as f64)
+                            .map(|i| {
+                                let v = ptr.add((i as usize) * (num_channels as usize)).read();
+                                v as f64 / 32768.0 // 归一化到 [-1.0, 1.0]
+                            })
                             .collect()
                     }
                     SampleFmt::S32 => {
                         let ptr = data_ptr as *const i32;
                         (0..num_frames)
-                            .map(|i| ptr.add((i as usize) * (num_channels as usize)).read() as f64)
+                            .map(|i| {
+                                let v = ptr.add((i as usize) * (num_channels as usize)).read();
+                                v as f64 / 2147483648.0 // 归一化到 [-1.0, 1.0]
+                            })
                             .collect()
                     }
                     SampleFmt::F32 => {
                         let ptr = data_ptr as *const f32;
                         (0..num_frames)
-                            .map(|i| ptr.add((i as usize) * (num_channels as usize)).read() as f64)
+                            .map(|i| {
+                                let v = ptr.add((i as usize) * (num_channels as usize)).read();
+                                v as f64 // f32 已经是 [-1.0, 1.0]
+                            })
                             .collect()
                     }
                 };
