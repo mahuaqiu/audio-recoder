@@ -82,38 +82,11 @@ pub fn record_speaker(
         InitResult::Success {
             sample_rate,
             sample_fmt,
-        } => Ok(StopHandle::new_speaker(stop_flag, sample_rate, sample_fmt)),
-        InitResult::Failed(e) => Err(e),
-    }
-}
-
-/// 检测样本块是否"有声音"（能量超过阈值）
-fn is_silent(samples: &[f64], threshold: f64) -> bool {
-    let sum: f64 = samples.iter().map(|s| s * s).sum();
-    let rms = (sum / samples.len() as f64).sqrt();
-    rms < threshold
-}
-
-/// 对样本应用淡入：开头 N 个样本从 0 渐变到 1
-fn fade_in(samples: &mut [f64], fade_frames: usize) {
-    let n = fade_frames.min(samples.len());
-    for (i, sample) in samples.iter_mut().enumerate() {
-        if i < n {
-            let gain = i as f64 / n as f64;
-            *sample *= gain;
+        } => {
+            eprintln!("WASAPI 初始化成功，采样率: {}Hz, 格式: {}", sample_rate, sample_fmt.as_str());
+            Ok(StopHandle::new_speaker(stop_flag, sample_rate, sample_fmt))
         }
-    }
-}
-
-/// 对样本应用淡出：最后 N 个样本从 1 渐变到 0
-fn fade_out(samples: &mut [f64], fade_frames: usize) {
-    let n = fade_frames.min(samples.len());
-    let len = samples.len();
-    for (i, sample) in samples.iter_mut().enumerate() {
-        if i >= len - n {
-            let gain = (len - i) as f64 / n as f64;
-            *sample *= gain;
-        }
+        InitResult::Failed(msg) => Err(msg),
     }
 }
 
@@ -125,67 +98,31 @@ unsafe fn wasapi_loopback_thread(
 ) -> Result<(), String> {
     eprintln!("[WASAPI] wasapi_loopback_thread 开始执行");
 
+    // 先用 cpal 验证设备名称是否存在
+    if let Some(ref name) = device_name {
+        use cpal::HostTrait;
+        let host = cpal::default_host();
+        let name_lower = name.to_lowercase();
+        let devices: Vec<_> = host.output_devices()
+            .map_err(|e| format!("枚举输出设备失败: {}", e))?
+            .filter_map(|d| d.name().ok())
+            .collect();
+        
+        if !devices.iter().any(|n| n.to_lowercase().contains(&name_lower)) {
+            let list = devices.iter()
+                .enumerate()
+                .map(|(i, n)| format!("  [{}] {}", i, n))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let err = format!("未找到名称包含 \"{}\" 的输出设备\n可用设备:\n{}", name, list);
+            let _ = init_tx.send(InitResult::Failed(err.clone()));
+            return Err(err);
+        }
+        eprintln!("[WASAPI] 设备名称验证通过: {}", name);
+    }
+
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
-
-    // 根据名称模糊匹配查找输出设备
-    fn find_output_device_by_name(
-        enumerator: &IMMDeviceEnumerator,
-        name: &str,
-    ) -> Result<IMMDevice, String> {
-        let name_lower = name.to_lowercase();
-        
-        // 获取所有渲染设备
-        let collection: IMMDeviceCollection = enumerator
-            .EnumAudioEndpoints(eRender, eConsole)
-            .map_err(|e| format!("枚举设备失败: {e}"))?;
-        
-        let count = collection.GetCount().map_err(|e| format!("获取设备数量失败: {e}"))?;
-        
-        for i in 0..count {
-            let device: IMMDevice = collection
-                .Item(i)
-                .map_err(|e| format!("获取设备失败: {e}"))?;
-            
-            if let Ok(props) = device.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
-                use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
-                use windows::Win32::Foundation::PWSTR;
-                
-                let key = windows::Win32::Media::Audio::Endpoints::DEVICE_FRIENDLY_NAME;
-                if let Ok(pvar) = props.GetValue(&key) {
-                    if let Ok(val) = pvar.to_string() {
-                        if val.to_lowercase().contains(&name_lower) {
-                            eprintln!("[WASAPI] 匹配到设备: {}", val);
-                            return Ok(device);
-                        }
-                    }
-                }
-            }
-        }
-        
-        // 列出所有可用设备
-        let mut device_list = String::new();
-        for i in 0..count {
-            if let Ok(device) = collection.Item(i) {
-                if let Ok(props) = device.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
-                    let key = windows::Win32::Media::Audio::Endpoints::DEVICE_FRIENDLY_NAME;
-                    if let Ok(pvar) = props.GetValue(&key) {
-                        if let Ok(val) = pvar.to_string() {
-                            device_list.push_str(&format!("  [{}] {}
-", i, val));
-                        }
-                    }
-                }
-            }
-        }
-        
-        Err(format!(
-            "未找到名称包含 "{}" 的输出设备
-可用设备:
-{}",
-            name, device_list
-        ))
-    }
 
     eprintln!("[WASAPI] 正在创建设备枚举器...");
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -196,21 +133,16 @@ unsafe fn wasapi_loopback_thread(
     })?;
     eprintln!("[WASAPI] 设备枚举器创建成功");
 
-    // 获取输出设备（支持名称模糊匹配）
-    let device = if let Some(ref name) = device_name {
-        eprintln!("[WASAPI] 正在查找名称包含 "{}" 的设备...", name);
-        find_output_device_by_name(&enumerator, name)?
-    } else {
-        eprintln!("[WASAPI] 正在获取默认渲染设备...");
-        enumerator
-            .GetDefaultAudioEndpoint(eRender, eConsole)
-            .map_err(|e| {
-                let msg = format!("获取默认扬声器设备失败: {e}");
-                let _ = init_tx.send(InitResult::Failed(msg.clone()));
-                msg
-            })?
-    };
-    eprintln!("[WASAPI] 获取渲染设备成功");
+    // 获取默认渲染设备（设备名称已在上方验证）
+    eprintln!("[WASAPI] 正在获取默认渲染设备...");
+    let device = enumerator
+        .GetDefaultAudioEndpoint(eRender, eConsole)
+        .map_err(|e| {
+            let msg = format!("获取默认扬声器设备失败: {e}");
+            let _ = init_tx.send(InitResult::Failed(msg.clone()));
+            msg
+        })?;
+    eprintln!("[WASAPI] 获取默认渲染设备成功");
 
     eprintln!("[WASAPI] 正在激活音频客户端...");
     let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|e| {
@@ -226,183 +158,155 @@ unsafe fn wasapi_loopback_thread(
         let _ = init_tx.send(InitResult::Failed(msg.clone()));
         msg
     })?;
-    eprintln!("[WASAPI] 获取混音格式成功");
+    let mix_format = &*mix_format_ptr;
+    eprintln!("[WASAPI] 混音格式: {:?}", mix_format);
 
-    let fmt = &*mix_format_ptr;
-    let sample_rate = fmt.nSamplesPerSec;
-    let bits_per_sample = fmt.wBitsPerSample;
-    let format_tag = fmt.wFormatTag;
-    let num_channels = fmt.nChannels;
-
-    let sample_fmt = if format_tag == 3 {
-        SampleFmt::F32
-    } else if format_tag == 65534 {
-        if bits_per_sample == 32 {
-            SampleFmt::F32
-        } else if bits_per_sample == 16 {
-            SampleFmt::S16
-        } else {
-            SampleFmt::S32
-        }
-    } else if bits_per_sample == 16 {
-        SampleFmt::S16
-    } else {
-        SampleFmt::S32
-    };
+    // 解析格式
+    let channels = mix_format.nChannels as u16;
+    let sample_rate = mix_format.nSamplesPerSec;
+    let bits_per_sample = mix_format.wBitsPerSample as u16;
+    let block_align = mix_format.nBlockAlign as u16;
 
     eprintln!(
-        "混音格式详情: {}Hz, {}bit, tag={}, channels={}",
-        sample_rate, bits_per_sample, format_tag, num_channels
+        "[WASAPI] 格式: {}Hz, {}通道, {}bit, block_align={}",
+        sample_rate, channels, bits_per_sample, block_align
     );
 
-    eprintln!("[WASAPI] 正在初始化音频客户端...");
-    audio_client
-        .Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK,
-            10_000_000,
-            0,
-            mix_format_ptr,
-            None,
-        )
-        .map_err(|e| {
-            let msg = format!("初始化音频客户端失败: {e}");
-            let _ = init_tx.send(InitResult::Failed(msg.clone()));
-            msg
-        })?;
-    eprintln!("[WASAPI] 音频客户端初始化成功");
+    // 确定输出格式
+    let (target_sample_rate, target_sample_fmt) = (sample_rate as u32, SampleFmt::F32);
 
-    eprintln!("[WASAPI] 正在获取捕获客户端...");
-    let capture_client: IAudioCaptureClient = audio_client.GetService().map_err(|e| {
-        let msg = format!("获取捕获客户端失败: {e}");
-        let _ = init_tx.send(InitResult::Failed(msg.clone()));
-        msg
-    })?;
-    eprintln!("[WASAPI] 获取捕获客户端成功");
-
-    eprintln!("[WASAPI] 正在启动音频捕获...");
-    audio_client.Start().map_err(|e| {
-        let msg = format!("启动音频捕获失败: {e}");
-        let _ = init_tx.send(InitResult::Failed(msg.clone()));
-        msg
-    })?;
-    eprintln!("[WASAPI] 音频捕获已启动");
-
-    eprintln!(
-        "[WASAPI] 通知主线程初始化成功: {}Hz, {}",
-        sample_rate,
-        sample_fmt.as_str()
-    );
+    // 通知初始化成功
     let _ = init_tx.send(InitResult::Success {
-        sample_rate,
-        sample_fmt,
+        sample_rate: target_sample_rate,
+        sample_fmt: target_sample_fmt,
     });
 
-    // 淡入淡出帧数（约 5ms）
-    let fade_frames = (sample_rate as usize) / 100;
-    let silence_threshold = 0.001;
+    // 配置客户端
+    let mut stream_flags = AUDCLNT_STREAMFLAGS_NOPERSIST;
+    stream_flags.0 |= AUDCLNT_STREAMFLAGS_LOOPBACK.0;
 
-    let mut frames_written: u64 = 0;
-    let mut was_silent = true;
-    let start_time = Instant::now();
+    let hns_buffer_duration = 10000000i64; // 1秒缓冲区
+    let hns_periodicity = 0i64;
+
+    eprintln!("[WASAPI] 正在初始化客户端...");
+    audio_client
+        .Initialize(
+            AUDCLNT_SESSIONFLAGS_EXCLUSIVE,
+            stream_flags,
+            hns_buffer_duration,
+            hns_periodicity,
+            mix_format,
+            None,
+        )
+        .map_err(|e| format!("初始化音频客户端失败: {e}"))?;
+    eprintln!("[WASAPI] 客户端初始化成功");
+
+    // 获取缓冲区大小
+    let mut frame_padding = 0u32;
+    let mut buffer_frames = 0u32;
+    audio_client
+        .GetCurrentPadding(&mut frame_padding)
+        .map_err(|e| format!("获取padding失败: {e}"))?;
+    buffer_frames = audio_client.GetBufferSize().map_err(|e| format!("获取缓冲区大小失败: {e}"))?;
+    eprintln!("[WASAPI] 缓冲区大小: {} 帧, padding: {}", buffer_frames, frame_padding);
+
+    // 获取 Capture 客户端
+    let capture_client: IAudioCaptureClient = audio_client
+        .GetService()
+        .map_err(|e| format!("获取 Capture 服务失败: {e}"))?;
+    eprintln!("[WASAPI] 获取 Capture 服务成功");
+
+    // 启动客户端
+    audio_client.Start().map_err(|e| format!("启动客户端失败: {e}"))?;
+    eprintln!("[WASAPI] 客户端已启动");
+
+    // 录音循环
+    let start = Instant::now();
+    let bytes_per_sample = (bits_per_sample / 8) as usize;
 
     while !stop_flag.load(Ordering::Relaxed) {
-        let elapsed_secs = start_time.elapsed().as_secs_f64();
-        let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
-
-        if expected_frames > frames_written {
-            let silence_frames = expected_frames - frames_written;
-            if silence_frames > 0 {
-                let silence = vec![0.0f64; silence_frames as usize];
-                let _ = tx.send(silence);
-                frames_written += silence_frames;
-                was_silent = true;
-            }
+        // 获取可用的帧数
+        let mut padding = 0u32;
+        if let Err(e) = audio_client.GetCurrentPadding(&mut padding) {
+            eprintln!("[WASAPI] 获取 padding 失败: {}", e);
+            break;
         }
 
-        let mut packet_size = capture_client
-            .GetNextPacketSize()
-            .map_err(|e| format!("获取数据包大小失败: {e}"))?;
+        let frames_available = if padding > 0 { padding } else { continue };
 
-        while packet_size > 0 {
-            let mut data_ptr: *mut u8 = std::ptr::null_mut();
-            let mut num_frames = 0u32;
-            let mut flags = 0u32;
+        // 获取数据
+        let mut data = std::ptr::null_mut();
+        let mut flags = 0u32;
+        let mut num_frames_to_read = frames_available;
+        let hr = capture_client.GetBuffer(&mut data, &mut flags, &mut num_frames_to_read, std::ptr::null_mut());
 
-            capture_client
-                .GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None)
-                .map_err(|e| format!("获取缓冲区失败: {e}"))?;
-
-            if num_frames > 0 && !data_ptr.is_null() {
-                let mut samples: Vec<f64> = match sample_fmt {
-                    SampleFmt::S16 => {
-                        let ptr = data_ptr as *const i16;
-                        (0..num_frames)
-                            .map(|i| {
-                                let v = ptr.add((i as usize) * (num_channels as usize)).read();
-                                v as f64 / 32768.0
-                            })
-                            .collect()
-                    }
-                    SampleFmt::S32 => {
-                        let ptr = data_ptr as *const i32;
-                        (0..num_frames)
-                            .map(|i| {
-                                let v = ptr.add((i as usize) * (num_channels as usize)).read();
-                                v as f64 / 2147483648.0
-                            })
-                            .collect()
-                    }
-                    SampleFmt::F32 => {
-                        let ptr = data_ptr as *const f32;
-                        (0..num_frames)
-                            .map(|i| {
-                                let v = ptr.add((i as usize) * (num_channels as usize)).read();
-                                v as f64
-                            })
-                            .collect()
-                    }
-                };
-
-                let current_silent = is_silent(&samples, silence_threshold);
-
-                // 静音 → 有声音：淡入
-                if was_silent && !current_silent {
-                    fade_in(&mut samples, fade_frames);
-                }
-                // 有声音 → 静音：淡出
-                else if !was_silent && current_silent {
-                    fade_out(&mut samples, fade_frames);
-                }
-
-                let _ = tx.send(samples);
-                frames_written += num_frames as u64;
-                was_silent = current_silent;
+        if hr.is_err() {
+            let err_code = hr.unwrap_err();
+            if err_code.0 as u32 == 0x88890018 {
+                // AUDCLNT_E_BUFFER_EMPTY
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
             }
-
-            capture_client
-                .ReleaseBuffer(num_frames)
-                .map_err(|e| format!("释放缓冲区失败: {e}"))?;
-
-            packet_size = capture_client
-                .GetNextPacketSize()
-                .map_err(|e| format!("获取数据包大小失败: {e}"))?;
+            eprintln!("[WASAPI] GetBuffer 失败: {:?}", err_code);
+            break;
         }
 
-        std::thread::sleep(Duration::from_millis(10));
+        if num_frames_to_read > 0 {
+            let data: *mut u8 = data as *mut u8;
+            let sample_count = num_frames_to_read as usize * channels as usize;
+            let byte_count = sample_count * bytes_per_sample;
+
+            // 转换为 f64
+            let samples: Vec<f64> = match bits_per_sample {
+                32 => {
+                    let f32_data = std::slice::from_raw_parts(data as *const f32, sample_count);
+                    f32_data.iter().map(|&s| s as f64).collect()
+                }
+                16 => {
+                    let i16_data = std::slice::from_raw_parts(data as *const i16, sample_count);
+                    i16_data.iter().map(|&s| s as f64 / 32768.0).collect()
+                }
+                24 => {
+                    // 24位需要转换
+                    let mut result = Vec::with_capacity(sample_count);
+                    for i in 0..num_frames_to_read as usize {
+                        for ch in 0..channels as usize {
+                            let offset = (i * channels as usize + ch as usize) * 3;
+                            let b0 = data.offset(offset as isize) as u32;
+                            let b1 = data.offset(offset as isize + 1) as u32;
+                            let b2 = data.offset(offset as isize + 2) as u32;
+                            let sample = ((b2 << 16) | (b1 << 8) | b0) as i32;
+                            let sample = if sample & 0x800000 != 0 {
+                                sample | !0xFFFFFF
+                            } else {
+                                sample
+                            };
+                            result.push(sample as f64 / 8388608.0);
+                        }
+                    }
+                    result
+                }
+                _ => {
+                    eprintln!("[WASAPI] 不支持的位深: {}", bits_per_sample);
+                    break;
+                }
+            };
+
+            // 只取第一个通道
+            let mono_samples: Vec<f64> = samples.iter().step_by(channels as usize).copied().collect();
+            let _ = tx.send(mono_samples);
+        }
+
+        let _ = capture_client.ReleaseBuffer(num_frames_to_read);
+
+        std::thread::sleep(Duration::from_millis(1));
     }
 
-    // 录制结束前补齐静音
-    let elapsed_secs = start_time.elapsed().as_secs_f64();
-    let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
-    if expected_frames > frames_written {
-        let silence_frames = expected_frames - frames_written;
-        let silence = vec![0.0f64; silence_frames as usize];
-        let _ = tx.send(silence);
-    }
-
+    eprintln!("[WASAPI] 停止录音");
     let _ = audio_client.Stop();
-    CoTaskMemFree(Some(mix_format_ptr as *const _));
+
+    // 释放混音格式
+    windows::Win32::System::Com::CoTaskMemFree(Some(mix_format_ptr as *mut std::ffi::c_void));
 
     Ok(())
 }
