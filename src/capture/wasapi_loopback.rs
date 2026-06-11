@@ -1,21 +1,27 @@
 //! Windows 扬声器录制 - 使用 WASAPI loopback 捕获系统音频
 
-use crate::capture::{RecordConfig, StopHandle, InitStatus, SampleFmt};
+use crate::capture::{StopHandle, SampleFmt, RecordConfig};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+/// 初始化结果
+enum InitResult {
+    Success { sample_rate: u32, sample_fmt: SampleFmt },
+    Failed(String),
+}
+
 /// 使用 WASAPI loopback 录制扬声器音频（仅 Windows）
 pub fn record_speaker(
-    config: &RecordConfig,
+    _config: &RecordConfig,
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
     use windows::Win32::System::Com::*;
     use windows::Win32::Media::Audio::*;
 
-    // 创建通道用于传递初始化状态和实际参数
+    // 创建通道用于传递初始化结果
     let (init_tx, init_rx) = mpsc::channel();
 
     unsafe {
@@ -38,32 +44,26 @@ pub fn record_speaker(
         
         match result {
             Ok((rate, fmt)) => {
-                eprintln!("设备混音格式: {}Hz, {}", rate, fmt.as_str());
-                let _ = init_tx.send(InitStatus::Success);
+                eprintln!("WASAPI loopback 录制已启动: {}Hz, {}", rate, fmt.as_str());
+                let _ = init_tx.send(InitResult::Success { sample_rate: rate, sample_fmt: fmt });
             }
             Err(e) => {
                 eprintln!("WASAPI loopback 录制错误: {e}");
-                let _ = init_tx.send(InitStatus::Failed);
+                let _ = init_tx.send(InitResult::Failed(e));
             }
         }
     });
 
-    // 启动后立即返回，让后台线程去获取格式
-    // 延迟获取实际参数
-    std::thread::sleep(Duration::from_millis(500));
-    
-    // 这里先返回默认值，后续通过 init_rx 获取（但需要改架构）
-    // 简化为：先返回，等初始化完成后再更新
-    // 由于时间关系，暂时用默认值，实际参数会通过后台日志显示
-    
-    let handle = StopHandle::new_speaker_with_status(
-        stop_flag, 
-        init_rx, 
-        48000, // 默认值，后续改进
-        SampleFmt::F32,
-    );
-    
-    Ok(handle)
+    // 等待初始化完成（最多 5 秒）
+    let init_result = init_rx.recv_timeout(Duration::from_secs(5))
+        .map_err(|e| format!("等待 WASAPI 初始化超时: {e}"))?;
+
+    match init_result {
+        InitResult::Success { sample_rate, sample_fmt } => {
+            Ok(StopHandle::new_speaker(stop_flag, sample_rate, sample_fmt))
+        }
+        InitResult::Failed(e) => Err(e),
+    }
 }
 
 unsafe fn wasapi_loopback_thread(
@@ -96,7 +96,10 @@ unsafe fn wasapi_loopback_thread(
     let format_tag = fmt.wFormatTag;
     let num_channels = fmt.nChannels;
 
-    let sample_fmt = if format_tag == 3 {
+    // WAVE_FORMAT_EXTENSIBLE (0xFFFE = 65534) 是 Windows 音频引擎的标准格式
+    // 需要根据 bits_per_sample 判断实际格式
+    let sample_fmt = if format_tag == 3 || (format_tag == 65534 && bits_per_sample == 32) {
+        // IEEE_FLOAT 或 EXTENSIBLE 32-bit → f32
         SampleFmt::F32
     } else if bits_per_sample == 16 {
         SampleFmt::S16
@@ -114,7 +117,7 @@ unsafe fn wasapi_loopback_thread(
             AUDCLNT_STREAMFLAGS_LOOPBACK,
             10_000_000, // 1秒缓冲
             0,
-            &*mix_format_ptr,
+            mix_format_ptr,
             None,
         )
         .map_err(|e| format!("初始化音频客户端失败: {e}"))?;

@@ -85,6 +85,22 @@ impl StopHandle {
         }
     }
 
+    /// 创建扬声器录制的停止句柄（初始化已完成，已知参数）
+    pub fn new_speaker(
+        stop_flag: Arc<AtomicBool>,
+        sample_rate: u32,
+        sample_fmt: SampleFmt,
+    ) -> Self {
+        Self {
+            stream: None,
+            stop_flag: Some(stop_flag),
+            status: Arc::new(AtomicU8::new(RecordStatus::Recording as u8)),
+            init_rx: None,
+            actual_sample_rate: sample_rate,
+            actual_sample_fmt: sample_fmt,
+        }
+    }
+
     /// 检查录制是否正在运行（初始化成功且未停止）
     pub fn is_recording(&self) -> bool {
         // 如果有 init_rx，先检查初始化状态

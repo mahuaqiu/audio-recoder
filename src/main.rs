@@ -184,9 +184,9 @@ fn wav_writer_loop(
 ) -> Result<(), String> {
     // 使用实际采样率写 WAV header，但用目标格式写数据
     let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: actual_rate,
-        bits_per_sample: target_fmt.bits_per_sample(),
+    channels: 1,
+        sample_rate: target_rate,
+    bits_per_sample: target_fmt.bits_per_sample(),
         sample_format: target_fmt.to_hound_sample_format(),
     };
 

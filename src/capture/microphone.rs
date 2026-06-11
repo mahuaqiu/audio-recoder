@@ -52,6 +52,8 @@ pub fn record_microphone(
         .with_sample_rate(cpal::SampleRate(used_sample_rate))
         .config();
 
+    let num_channels = stream_config.channels as usize;
+
     let err_fn = |err: cpal::StreamError| {
         eprintln!("音频流错误: {err}");
     };
@@ -62,7 +64,8 @@ pub fn record_microphone(
             .build_input_stream(
                 &stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f64> = data.iter().map(|&s| s as f64).collect();
+                    // 只取第一个通道的数据
+                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64).collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
@@ -73,7 +76,7 @@ pub fn record_microphone(
             .build_input_stream(
                 &stream_config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f64> = data.iter().map(|&s| s as f64).collect();
+                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64).collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
@@ -84,7 +87,7 @@ pub fn record_microphone(
             .build_input_stream(
                 &stream_config,
                 move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f64> = data.iter().map(|&s| s as f64).collect();
+                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64).collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
