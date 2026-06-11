@@ -1,8 +1,8 @@
 //! macOS 扬声器录制 - 使用 ScreenCaptureKit 捕获系统音频
 //! 需要 macOS 13.0+ 和屏幕录制权限
 
-use crate::capture::{RecordConfig, StopHandle};
 use crate::capture::InitStatus;
+use crate::capture::{RecordConfig, StopHandle};
 use screencapturekit::prelude::*;
 use std::sync::mpsc;
 use std::sync::{Arc, AtomicBool};
@@ -17,7 +17,7 @@ pub fn record_speaker(
 ) -> Result<StopHandle, String> {
     // 创建停止标志
     let stop_flag = Arc::new(AtomicBool::new(false));
-    
+
     // 创建通道用于传递初始化状态
     let (init_tx, init_rx) = mpsc::channel();
 
@@ -35,12 +35,13 @@ pub fn record_speaker(
     thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             // 获取可共享的内容（需要权限）
-            let content = rt.block_on(async {
-                SCShareableContent::get()
-            }).map_err(|e| format!("获取屏幕内容失败，请确认已授予屏幕录制权限: {e}"))?;
+            let content = rt
+                .block_on(async { SCShareableContent::get() })
+                .map_err(|e| format!("获取屏幕内容失败，请确认已授予屏幕录制权限: {e}"))?;
 
             // 获取第一个显示器
-            let display = content.displays()
+            let display = content
+                .displays()
                 .into_iter()
                 .next()
                 .ok_or("未找到可用的显示器")?;
@@ -54,12 +55,12 @@ pub fn record_speaker(
             // 配置流 - 只启用音频捕获
             let mut stream_config = SCStreamConfiguration::new();
             stream_config.set_captures_audio(true);
-            
+
             // 设置采样率
             let sample_rate = AudioSampleRate::from_hz(config.sample_rate as i32)
                 .unwrap_or(AudioSampleRate::Rate48000);
             stream_config.set_sample_rate(sample_rate);
-            
+
             // 设置单声道
             stream_config.set_audio_channel_count(AudioChannelCount::Mono);
 
@@ -80,7 +81,7 @@ pub fn record_speaker(
                         for buffer in audio_buffer_list.iter() {
                             let data = buffer.data();
                             let bytes_per_sample = 4; // float32
-                            
+
                             // 将 bytes 转换为 f64 样本
                             let samples: Vec<f64> = data
                                 .chunks_exact(bytes_per_sample)
@@ -100,9 +101,8 @@ pub fn record_speaker(
             );
 
             // 启动流
-            rt.block_on(async {
-                sc_stream.start()
-            }).map_err(|e| format!("启动流失败: {e}"))?;
+            rt.block_on(async { sc_stream.start() })
+                .map_err(|e| format!("启动流失败: {e}"))?;
 
             // 保持运行直到收到停止信号
             while !stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
@@ -110,9 +110,8 @@ pub fn record_speaker(
             }
 
             // 停止流
-            rt.block_on(async {
-                sc_stream.stop()
-            }).map_err(|e| format!("停止流失败: {e}"))?;
+            rt.block_on(async { sc_stream.stop() })
+                .map_err(|e| format!("停止流失败: {e}"))?;
 
             Ok(())
         })();

@@ -1,7 +1,7 @@
-use crate::capture::{RecordConfig, SampleFmt};
 use crate::capture::StopHandle;
+use crate::capture::{RecordConfig, SampleFmt};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
-use cpal::traits::{HostTrait, DeviceTrait, StreamTrait};
 use std::sync::mpsc;
 
 /// 使用 cpal 录制麦克风音频
@@ -11,7 +11,7 @@ pub fn record_microphone(
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
     let host = cpal::default_host();
-    
+
     // 选择设备：如果指定了设备索引则使用，否则使用默认设备
     let device = if let Some(idx) = config.device_index {
         host.input_devices()
@@ -19,8 +19,7 @@ pub fn record_microphone(
             .nth(idx)
             .ok_or_else(|| format!("未找到索引为 {} 的输入设备", idx))?
     } else {
-        host.default_input_device()
-            .ok_or("未找到麦克风设备")?
+        host.default_input_device().ok_or("未找到麦克风设备")?
     };
 
     eprintln!("麦克风设备: {}", device.name().unwrap_or_default());
@@ -36,14 +35,18 @@ pub fn record_microphone(
     }
 
     // 尝试找到匹配的配置，先精确匹配，然后 fallback
-    let (selected_range, used_sample_rate, used_sample_fmt) = 
-        find_best_config(&supported_config_ranges, config.sample_rate, config.sample_fmt)?;
+    let (selected_range, used_sample_rate, used_sample_fmt) = find_best_config(
+        &supported_config_ranges,
+        config.sample_rate,
+        config.sample_fmt,
+    )?;
 
     // 如果实际使用的参数与请求的不同，打印提示
     if used_sample_rate != config.sample_rate || used_sample_fmt != config.sample_fmt {
         eprintln!(
             "提示: 设备不支持请求的参数，已自动适配 - 采样率: {}Hz, 格式: {}",
-            used_sample_rate, used_sample_fmt.as_str()
+            used_sample_rate,
+            used_sample_fmt.as_str()
         );
     }
 
@@ -65,7 +68,11 @@ pub fn record_microphone(
                 &stream_config,
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     // 只取第一个通道的数据
-                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64).collect();
+                    let samples: Vec<f64> = data
+                        .iter()
+                        .step_by(num_channels)
+                        .map(|&s| s as f64)
+                        .collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
@@ -77,7 +84,11 @@ pub fn record_microphone(
                 &stream_config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     // S16 是 16 位整数，范围 -32768~32767，需要归一化到 -1.0~1.0
-                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64 / 32768.0).collect();
+                    let samples: Vec<f64> = data
+                        .iter()
+                        .step_by(num_channels)
+                        .map(|&s| s as f64 / 32768.0)
+                        .collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
@@ -89,7 +100,11 @@ pub fn record_microphone(
                 &stream_config,
                 move |data: &[i32], _: &cpal::InputCallbackInfo| {
                     // S32 是 32 位整数，范围 -2147483648~2147483647，需要归一化
-                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64 / 2147483648.0).collect();
+                    let samples: Vec<f64> = data
+                        .iter()
+                        .step_by(num_channels)
+                        .map(|&s| s as f64 / 2147483648.0)
+                        .collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
@@ -100,7 +115,11 @@ pub fn record_microphone(
 
     stream.play().map_err(|e| format!("启动音频流失败: {e}"))?;
 
-    Ok(StopHandle::new_microphone(stream, used_sample_rate, used_sample_fmt))
+    Ok(StopHandle::new_microphone(
+        stream,
+        used_sample_rate,
+        used_sample_fmt,
+    ))
 }
 
 /// 从支持的配置范围中找到最佳匹配，优先精确匹配，然后 fallback
@@ -120,17 +139,17 @@ fn find_best_config(
 
     // 2. 尝试匹配采样率，接受任意格式
     if let Some(range) = ranges.iter().find(|r| {
-        r.min_sample_rate().0 <= requested_rate
-            && r.max_sample_rate().0 >= requested_rate
+        r.min_sample_rate().0 <= requested_rate && r.max_sample_rate().0 >= requested_rate
     }) {
         let used_fmt = cpal_to_sample_fmt(range.sample_format())?;
         return Ok((range.clone(), requested_rate, used_fmt));
     }
 
     // 3. 尝试匹配格式，接受任意采样率（取最接近的）
-    if let Some(range) = ranges.iter().find(|r| {
-        r.sample_format() == sample_fmt_to_cpal(requested_fmt)
-    }) {
+    if let Some(range) = ranges
+        .iter()
+        .find(|r| r.sample_format() == sample_fmt_to_cpal(requested_fmt))
+    {
         let used_rate = find_nearest_sample_rate(
             range.min_sample_rate().0,
             range.max_sample_rate().0,
@@ -179,7 +198,7 @@ fn find_nearest_sample_rate(min: u32, max: u32, target: u32) -> u32 {
     }
     // 常见采样率列表
     const COMMON_RATES: &[u32] = &[8000, 11025, 16000, 22050, 32000, 44100, 48000, 96000];
-    
+
     // 找到最接近的常用采样率
     COMMON_RATES
         .iter()

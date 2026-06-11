@@ -1,18 +1,22 @@
 mod capture;
 
 use capture::{RecordConfig, SampleFmt, Source};
-use std::sync::{mpsc, atomic::{AtomicBool, Ordering}};
-use std::time::{Duration, Instant};
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::time::{Duration, Instant};
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // 记录文件路径
 fn get_pid_file(output_path: &str) -> PathBuf {
     let path = PathBuf::from(output_path);
-    let stem = path.file_stem()
+    let stem = path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("recording");
     PathBuf::from(format!(".{}.pid", stem))
@@ -20,7 +24,8 @@ fn get_pid_file(output_path: &str) -> PathBuf {
 
 fn get_stop_file(output_path: &str) -> PathBuf {
     let path = PathBuf::from(output_path);
-    let stem = path.file_stem()
+    let stem = path
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("recording");
     PathBuf::from(format!(".{}.stop", stem))
@@ -29,7 +34,8 @@ fn get_stop_file(output_path: &str) -> PathBuf {
 fn main() {
     ctrlc::set_handler(|| {
         STOP_REQUESTED.store(true, Ordering::Relaxed);
-    }).expect("设置 Ctrl+C 处理失败");
+    })
+    .expect("设置 Ctrl+C 处理失败");
 
     let config = parse_args().unwrap_or_else(|e| {
         eprintln!("错误: {e}");
@@ -45,6 +51,11 @@ fn main() {
 }
 
 fn run(config: RecordConfig) -> Result<(), String> {
+    // 后台模式：直接 spawn 子进程以前台模式运行，父进程不初始化音频
+    if !config.foreground {
+        return run_background(&config);
+    }
+
     let source_name = match config.source {
         Source::Microphone => "麦克风",
         Source::Speaker => "扬声器",
@@ -81,95 +92,127 @@ fn run(config: RecordConfig) -> Result<(), String> {
     if actual_sample_rate != config.sample_rate || actual_sample_fmt != config.sample_fmt {
         eprintln!(
             "提示: 自动适配后，设备实际使用 {}Hz {}，\n      将重采样转换为目标 {}Hz {}",
-            actual_sample_rate, actual_sample_fmt.as_str(),
-            target_sample_rate, target_sample_fmt.as_str()
+            actual_sample_rate,
+            actual_sample_fmt.as_str(),
+            target_sample_rate,
+            target_sample_fmt.as_str()
         );
     }
 
     // 启动 WAV 写入线程
     let output_path = config.output_path.clone();
     let writer_thread = std::thread::spawn(move || {
-        wav_writer_loop(rx, &output_path, actual_sample_rate, target_sample_rate, target_sample_fmt)
+        wav_writer_loop(
+            rx,
+            &output_path,
+            actual_sample_rate,
+            target_sample_rate,
+            target_sample_fmt,
+        )
     });
 
     // 前台模式：阻塞等待录制完成
-    if config.foreground {
-        let start = Instant::now();
-        let duration = Duration::from_secs(config.duration_secs);
+    let start = Instant::now();
+    let duration = Duration::from_secs(config.duration_secs);
+    let stop_file = get_stop_file(&config.output_path);
+    let pid_file = get_pid_file(&config.output_path);
 
-        while start.elapsed() < duration && !STOP_REQUESTED.load(Ordering::Relaxed) {
-            let elapsed = start.elapsed().as_secs();
-            eprint!("\r已录制: {}s / {}s", elapsed, config.duration_secs);
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        eprintln!();
+    // 如果停止文件存在，说明是后台子进程，支持通过删除停止文件来停止
+    let has_stop_file = stop_file.exists();
 
-        // 停止录制（drop stop_handle 会停止音频流）
-        drop(stop_handle);
+    while start.elapsed() < duration && !STOP_REQUESTED.load(Ordering::Relaxed) {
+        let elapsed = start.elapsed().as_secs();
+        eprint!("\r已录制: {}s / {}s", elapsed, config.duration_secs);
 
-        // drop tx 已随 stop_handle drop 完成，channel 关闭后 writer 线程退出
-        let _ = writer_thread.join();
-
-        eprintln!("录制完成: {}", config.output_path);
-    } else {
-        // 后台模式：启动后立即返回
-        
-        // 创建 PID 文件和停止文件
-        let pid_file = get_pid_file(&config.output_path);
-        let stop_file = get_stop_file(&config.output_path);
-        
-        // 写入 PID
-        let pid = std::process::id();
-        fs::write(&pid_file, format!("{}", pid)).map_err(|e| format!("写入 PID 文件失败: {e}"))?;
-        
-        // 创建停止文件（存在表示需要继续录制）
-        fs::write(&stop_file, "running").map_err(|e| format!("创建停止文件失败: {e}"))?;
-
-        eprintln!("后台录制已启动，PID: {}", pid);
-        eprintln!("输出文件: {}", config.output_path);
-        eprintln!("PID 文件: {}", pid_file.display());
-        eprintln!("停止文件: {} (删除此文件可停止录制)", stop_file.display());
-        eprintln!();
-        eprintln!("停止录制的方式:");
-        eprintln!("  1. 删除停止文件: rm {}", stop_file.display());
-        eprintln!("  2. 发送信号: kill -INT {}", pid);
-        eprintln!("  3. 杀进程: kill {}", pid);
-
-        // 后台模式：监控停止文件
-        let stop_flag = std::sync::Arc::new(AtomicBool::new(false));
-        let stop_flag_clone = stop_flag.clone();
-        let stop_file_monitor = stop_file.clone();
-
-        // 启动监控线程
-        std::thread::spawn(move || {
-            // 等待 Ctrl+C 或停止文件被删除
-            while !STOP_REQUESTED.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(200));
-                
-                // 检查停止文件是否还存在
-                if !stop_file_monitor.exists() {
-                    eprintln!("\n检测到停止文件已删除，正在停止...");
-                    break;
-                }
-            }
-            stop_flag_clone.store(true, Ordering::Relaxed);
-        });
-
-        // 等待 stop_flag 被设置
-        while !stop_flag.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(200));
+        // 检查停止文件是否被删除
+        if has_stop_file && !stop_file.exists() {
+            eprintln!("\n检测到停止文件已删除，正在停止...");
+            break;
         }
 
-        // 停止录制
-        drop(stop_handle);
-        let _ = writer_thread.join();
-
-        // 清理文件
-        let _ = fs::remove_file(&pid_file);
-        let _ = fs::remove_file(&stop_file);
-
-        eprintln!("录制完成: {}", config.output_path);
+        std::thread::sleep(Duration::from_millis(500));
     }
+    eprintln!();
+
+    // 停止录制（drop stop_handle 会停止音频流）
+    drop(stop_handle);
+
+    // drop tx 已随 stop_handle drop 完成，channel 关闭后 writer 线程退出
+    let _ = writer_thread.join();
+
+    // 清理 PID 和停止文件
+    let _ = fs::remove_file(&pid_file);
+    let _ = fs::remove_file(&stop_file);
+
+    eprintln!("录制完成: {}", config.output_path);
+
+    Ok(())
+}
+
+/// 后台模式：spawn 子进程以前台模式运行，父进程立即退出
+fn run_background(config: &RecordConfig) -> Result<(), String> {
+    let pid_file = get_pid_file(&config.output_path);
+    let stop_file = get_stop_file(&config.output_path);
+
+    // 构建子进程命令：加上 -b 参数，其余参数保持不变
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("获取当前可执行文件路径失败: {e}"))?;
+    let mut cmd = std::process::Command::new(current_exe);
+    cmd.arg("-b"); // 子进程用前台模式
+    if config.source == Source::Speaker {
+        cmd.arg("-s").arg("speaker");
+    }
+    cmd.arg("-r").arg(config.sample_rate.to_string());
+    cmd.arg("-f").arg(config.sample_fmt.as_str());
+    cmd.arg("-d").arg(config.duration_secs.to_string());
+    cmd.arg("-o").arg(&config.output_path);
+    if let Some(idx) = config.device_index {
+        cmd.arg("-i").arg(idx.to_string());
+    }
+
+    // 子进程的标准输入/输出/错误分离，不阻塞父进程
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    // 创建停止文件（在子进程启动前创建，确保子进程能检测到）
+    fs::write(&stop_file, "running").map_err(|e| format!("创建停止文件失败: {e}"))?;
+
+    let child = cmd.spawn().map_err(|e| {
+        // 启动失败，清理停止文件
+        let _ = fs::remove_file(&stop_file);
+        format!("启动后台子进程失败: {e}")
+    })?;
+    let child_pid = child.id();
+
+    // 写入 PID 文件
+    fs::write(&pid_file, format!("{}", child_pid))
+        .map_err(|e| format!("写入 PID 文件失败: {e}"))?;
+
+    let source_name = match config.source {
+        Source::Microphone => "麦克风",
+        Source::Speaker => "扬声器",
+    };
+    eprintln!("后台录制已启动，PID: {}", child_pid);
+    eprintln!(
+        "录制参数: 源={}, 采样率={}Hz, 格式={}, 时长={}s",
+        source_name,
+        config.sample_rate,
+        config.sample_fmt.as_str(),
+        config.duration_secs
+    );
+    eprintln!("输出文件: {}", config.output_path);
+    eprintln!("PID 文件: {}", pid_file.display());
+    eprintln!("停止文件: {} (删除此文件可停止录制)", stop_file.display());
+    eprintln!();
+    eprintln!("停止录制的方式:");
+    eprintln!("  1. 删除停止文件: rm {}", stop_file.display());
+    eprintln!("  2. 发送信号: kill -INT {}", child_pid);
+    eprintln!("  3. 杀进程: kill {}", child_pid);
+
+    // 父进程立即退出，子进程在后台运行
+    // 不 wait 子进程，让它独立运行
+    std::mem::forget(child); // 防止 Drop 时 wait
 
     Ok(())
 }
@@ -184,9 +227,9 @@ fn wav_writer_loop(
 ) -> Result<(), String> {
     // 使用实际采样率写 WAV header，但用目标格式写数据
     let spec = hound::WavSpec {
-    channels: 1,
+        channels: 1,
         sample_rate: target_rate,
-    bits_per_sample: target_fmt.bits_per_sample(),
+        bits_per_sample: target_fmt.bits_per_sample(),
         sample_format: target_fmt.to_hound_sample_format(),
     };
 
@@ -206,24 +249,32 @@ fn wav_writer_loop(
             SampleFmt::S16 => {
                 for s in &resampled {
                     let val = (*s * 32767.0).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
-                    writer.write_sample(val).map_err(|e| format!("写入采样失败: {e}"))?;
+                    writer
+                        .write_sample(val)
+                        .map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
             SampleFmt::S32 => {
                 for s in &resampled {
                     let val = (*s * 2147483647.0).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
-                    writer.write_sample(val).map_err(|e| format!("写入采样失败: {e}"))?;
+                    writer
+                        .write_sample(val)
+                        .map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
             SampleFmt::F32 => {
                 for s in &resampled {
-                    writer.write_sample(*s as f32).map_err(|e| format!("写入采样失败: {e}"))?;
+                    writer
+                        .write_sample(*s as f32)
+                        .map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
         }
     }
 
-    writer.flush().map_err(|e| format!("flush WAV 文件失败: {e}"))?;
+    writer
+        .flush()
+        .map_err(|e| format!("flush WAV 文件失败: {e}"))?;
     Ok(())
 }
 
@@ -283,7 +334,9 @@ fn parse_args() -> Result<RecordConfig, String> {
     while let Some(arg) = parser.next().map_err(|e| format!("参数解析错误: {e}"))? {
         match arg {
             Short('s') | Long("source") => {
-                let val: OsString = parser.value().map_err(|e| format!("--source 需要参数: {e}"))?;
+                let val: OsString = parser
+                    .value()
+                    .map_err(|e| format!("--source 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
                 config.source = match val.as_str() {
                     "microphone" | "mic" => Source::Microphone,
@@ -292,30 +345,41 @@ fn parse_args() -> Result<RecordConfig, String> {
                 };
             }
             Short('r') | Long("sample-rate") => {
-                let val: OsString = parser.value().map_err(|e| format!("--sample-rate 需要参数: {e}"))?;
+                let val: OsString = parser
+                    .value()
+                    .map_err(|e| format!("--sample-rate 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
                 config.sample_rate = val.parse().map_err(|_| format!("无效的采样率: {val}"))?;
             }
             Short('f') | Long("sample-fmt") => {
-                let val: OsString = parser.value().map_err(|e| format!("--sample-fmt 需要参数: {e}"))?;
+                let val: OsString = parser
+                    .value()
+                    .map_err(|e| format!("--sample-fmt 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
                 config.sample_fmt = SampleFmt::from_str(&val)
                     .ok_or_else(|| format!("无效的采样格式: {val}，支持: s16, s32, f32"))?;
             }
             Short('d') | Long("duration") => {
-                let val: OsString = parser.value().map_err(|e| format!("--duration 需要参数: {e}"))?;
+                let val: OsString = parser
+                    .value()
+                    .map_err(|e| format!("--duration 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
                 config.duration_secs = val.parse().map_err(|_| format!("无效的录制时长: {val}"))?;
             }
             Short('o') | Long("output") => {
-                let val: OsString = parser.value().map_err(|e| format!("--output 需要参数: {e}"))?;
+                let val: OsString = parser
+                    .value()
+                    .map_err(|e| format!("--output 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
                 config.output_path = val;
             }
             Short('i') | Long("device") => {
-                let val: OsString = parser.value().map_err(|e| format!("--device 需要参数: {e}"))?;
+                let val: OsString = parser
+                    .value()
+                    .map_err(|e| format!("--device 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
-                config.device_index = Some(val.parse().map_err(|_| format!("无效的设备索引: {val}"))?);
+                config.device_index =
+                    Some(val.parse().map_err(|_| format!("无效的设备索引: {val}"))?);
             }
             Short('b') | Long("blocking") => {
                 config.foreground = true;

@@ -15,8 +15,8 @@ pub use wasapi_loopback::record_speaker;
 pub use macos_speaker::record_speaker;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// 录制状态
@@ -109,10 +109,12 @@ impl StopHandle {
             if let Ok(status) = rx.try_recv() {
                 match status {
                     InitStatus::Success => {
-                        self.status.store(RecordStatus::Recording as u8, Ordering::Relaxed);
+                        self.status
+                            .store(RecordStatus::Recording as u8, Ordering::Relaxed);
                     }
                     InitStatus::Failed => {
-                        self.status.store(RecordStatus::Failed as u8, Ordering::Relaxed);
+                        self.status
+                            .store(RecordStatus::Failed as u8, Ordering::Relaxed);
                         return false;
                     }
                 }
@@ -120,10 +122,12 @@ impl StopHandle {
                 // 超时后再次尝试接收
                 match status {
                     InitStatus::Success => {
-                        self.status.store(RecordStatus::Recording as u8, Ordering::Relaxed);
+                        self.status
+                            .store(RecordStatus::Recording as u8, Ordering::Relaxed);
                     }
                     InitStatus::Failed => {
-                        self.status.store(RecordStatus::Failed as u8, Ordering::Relaxed);
+                        self.status
+                            .store(RecordStatus::Failed as u8, Ordering::Relaxed);
                         return false;
                     }
                 }
@@ -142,14 +146,15 @@ impl Drop for StopHandle {
         if self.stream.is_some() {
             self.stream = None; // 这会 drop stream
         }
-        
+
         // 2. 如果有停止标志，设置它来通知录制线程（扬声器）
         if let Some(flag) = self.stop_flag.take() {
             flag.store(true, Ordering::Relaxed);
         }
 
         // 更新状态
-        self.status.store(RecordStatus::Stopped as u8, Ordering::Relaxed);
+        self.status
+            .store(RecordStatus::Stopped as u8, Ordering::Relaxed);
     }
 }
 
@@ -183,7 +188,7 @@ impl Default for RecordConfig {
             duration_secs: 120,
             output_path: "recording.wav".into(),
             device_index: None,
-            foreground: false,  // 默认后台模式
+            foreground: false, // 默认后台模式
         }
     }
 }
