@@ -18,7 +18,7 @@ enum InitResult {
 
 /// 使用 WASAPI loopback 录制扬声器音频（仅 Windows）
 pub fn record_speaker(
-    _config: &RecordConfig,
+    config: &RecordConfig,
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
     let (init_tx, init_rx) = mpsc::channel();
@@ -26,6 +26,7 @@ pub fn record_speaker(
     let stop_flag = Arc::new(AtomicBool::new(false));
     let stop_flag_clone = stop_flag.clone();
     let tx_clone = tx.clone();
+    let device_name = config.device_name.clone();
 
     eprintln!("正在录制系统音频 (WASAPI loopback)...");
 
@@ -46,7 +47,7 @@ pub fn record_speaker(
         eprintln!("[WASAPI] 准备调用 wasapi_loopback_thread...");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            wasapi_loopback_thread(tx_clone, stop_flag_clone, init_tx)
+            wasapi_loopback_thread(tx_clone, stop_flag_clone, init_tx, device_name)
         }));
 
         unsafe {
@@ -120,11 +121,71 @@ unsafe fn wasapi_loopback_thread(
     tx: mpsc::Sender<Vec<f64>>,
     stop_flag: Arc<AtomicBool>,
     init_tx: mpsc::Sender<InitResult>,
+    device_name: Option<String>,
 ) -> Result<(), String> {
     eprintln!("[WASAPI] wasapi_loopback_thread 开始执行");
 
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
+
+    // 根据名称模糊匹配查找输出设备
+    fn find_output_device_by_name(
+        enumerator: &IMMDeviceEnumerator,
+        name: &str,
+    ) -> Result<IMMDevice, String> {
+        let name_lower = name.to_lowercase();
+        
+        // 获取所有渲染设备
+        let collection: IMMDeviceCollection = enumerator
+            .EnumAudioEndpoints(eRender, eConsole)
+            .map_err(|e| format!("枚举设备失败: {e}"))?;
+        
+        let count = collection.GetCount().map_err(|e| format!("获取设备数量失败: {e}"))?;
+        
+        for i in 0..count {
+            let device: IMMDevice = collection
+                .Item(i)
+                .map_err(|e| format!("获取设备失败: {e}"))?;
+            
+            if let Ok(props) = device.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
+                use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
+                use windows::Win32::Foundation::PWSTR;
+                
+                let key = windows::Win32::Media::Audio::Endpoints::DEVICE_FRIENDLY_NAME;
+                if let Ok(pvar) = props.GetValue(&key) {
+                    if let Ok(val) = pvar.to_string() {
+                        if val.to_lowercase().contains(&name_lower) {
+                            eprintln!("[WASAPI] 匹配到设备: {}", val);
+                            return Ok(device);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 列出所有可用设备
+        let mut device_list = String::new();
+        for i in 0..count {
+            if let Ok(device) = collection.Item(i) {
+                if let Ok(props) = device.OpenPropertyStore(windows::Win32::System::Com::STGM_READ) {
+                    let key = windows::Win32::Media::Audio::Endpoints::DEVICE_FRIENDLY_NAME;
+                    if let Ok(pvar) = props.GetValue(&key) {
+                        if let Ok(val) = pvar.to_string() {
+                            device_list.push_str(&format!("  [{}] {}
+", i, val));
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(format!(
+            "未找到名称包含 "{}" 的输出设备
+可用设备:
+{}",
+            name, device_list
+        ))
+    }
 
     eprintln!("[WASAPI] 正在创建设备枚举器...");
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
@@ -135,15 +196,21 @@ unsafe fn wasapi_loopback_thread(
     })?;
     eprintln!("[WASAPI] 设备枚举器创建成功");
 
-    eprintln!("[WASAPI] 正在获取默认渲染设备...");
-    let device = enumerator
-        .GetDefaultAudioEndpoint(eRender, eConsole)
-        .map_err(|e| {
-            let msg = format!("获取默认扬声器设备失败: {e}");
-            let _ = init_tx.send(InitResult::Failed(msg.clone()));
-            msg
-        })?;
-    eprintln!("[WASAPI] 获取默认渲染设备成功");
+    // 获取输出设备（支持名称模糊匹配）
+    let device = if let Some(ref name) = device_name {
+        eprintln!("[WASAPI] 正在查找名称包含 "{}" 的设备...", name);
+        find_output_device_by_name(&enumerator, name)?
+    } else {
+        eprintln!("[WASAPI] 正在获取默认渲染设备...");
+        enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|e| {
+                let msg = format!("获取默认扬声器设备失败: {e}");
+                let _ = init_tx.send(InitResult::Failed(msg.clone()));
+                msg
+            })?
+    };
+    eprintln!("[WASAPI] 获取渲染设备成功");
 
     eprintln!("[WASAPI] 正在激活音频客户端...");
     let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|e| {
