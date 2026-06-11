@@ -14,6 +14,11 @@ pub use wasapi_loopback::record_speaker;
 #[cfg(target_os = "macos")]
 pub use macos_speaker::record_speaker;
 
+/// 列出所有可用的音频输入设备
+pub fn list_input_devices() -> Result<Vec<String>, String> {
+    microphone::list_input_devices()
+}
+
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -173,8 +178,8 @@ pub struct RecordConfig {
     pub sample_fmt: SampleFmt,
     pub duration_secs: u64,
     pub output_path: String,
-    /// 设备索引（从 0 开始），None 表示使用默认设备
-    pub device_index: Option<usize>,
+    /// 设备名称（模糊匹配），None 表示使用默认设备
+    pub device_name: Option<String>,
     /// 是否前台阻塞模式，false 则后台运行（默���）
     pub foreground: bool,
 }
@@ -187,7 +192,7 @@ impl Default for RecordConfig {
             sample_fmt: SampleFmt::S16,
             duration_secs: 120,
             output_path: "recording.wav".into(),
-            device_index: None,
+            device_name: None,
             foreground: false, // 默认后台模式
         }
     }

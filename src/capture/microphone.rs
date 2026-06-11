@@ -4,6 +4,70 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use std::sync::mpsc;
 
+/// 列出所有可用的音频输入设备名称
+pub fn list_input_devices() -> Result<Vec<String>, String> {
+    let host = cpal::default_host();
+    let devices: Vec<_> = host
+        .input_devices()
+        .map_err(|e| format!("枚举输入设备失败: {e}"))?
+        .filter_map(|d| d.name().ok())
+        .collect();
+    Ok(devices)
+}
+
+/// 根据名称模糊匹配查找输入设备
+/// 匹配规则：设备名称包含指定字符串（不区分大小写），返回第一个匹配的设备
+fn find_device_by_name(
+    host: &cpal::Host,
+    name: &str,
+) -> Result<cpal::Device, String> {
+    let name_lower = name.to_lowercase();
+    let mut devices: Vec<_> = host
+        .input_devices()
+        .map_err(|e| format!("枚举输入设备失败: {e}"))?
+        .collect();
+
+    if devices.is_empty() {
+        return Err("没有可用的输入设备".to_string());
+    }
+
+    // 模糊匹配：设备名称包含指定字符串（不区分大小写）
+    let matched = devices.iter().find(|d| {
+        d.name()
+            .map(|n| n.to_lowercase().contains(&name_lower))
+            .unwrap_or(false)
+    });
+
+    match matched {
+        Some(device) => {
+            let device_name = device.name().unwrap_or_default();
+            eprintln!("匹配到设备: {}", device_name);
+            // 从 devices 中取出匹配的设备（避免借用问题）
+            let idx = devices.iter().position(|d| {
+                d.name().map(|n| n == device_name).unwrap_or(false)
+            }).unwrap();
+            Ok(devices.remove(idx))
+        }
+        None => {
+            // 列出所有可用设备供参考
+            let device_list: Vec<String> = devices
+                .iter()
+                .filter_map(|d| d.name().ok())
+                .collect();
+            Err(format!(
+                "未找到名称包含 \"{}\" 的输入设备\n可用设备:\n{}",
+                name,
+                device_list
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| format!("  [{}] {}", i, n))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+        }
+    }
+}
+
 /// 使用 cpal 录制麦克风音频
 /// 采样数据通过 tx 发送，返回停止句柄
 pub fn record_microphone(
@@ -12,12 +76,9 @@ pub fn record_microphone(
 ) -> Result<StopHandle, String> {
     let host = cpal::default_host();
 
-    // 选择设备：如果指定了设备索引则使用，否则使用默认设备
-    let device = if let Some(idx) = config.device_index {
-        host.input_devices()
-            .map_err(|e| format!("枚举输入设备失败: {e}"))?
-            .nth(idx)
-            .ok_or_else(|| format!("未找到索引为 {} 的输入设备", idx))?
+    // 选择设备：如果指定了设备名称则模糊匹配，否则使用默认设备
+    let device = if let Some(ref name) = config.device_name {
+        find_device_by_name(&host, name)?
     } else {
         host.default_input_device().ok_or("未找到麦克风设备")?
     };

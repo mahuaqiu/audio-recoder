@@ -37,17 +37,51 @@ fn main() {
     })
     .expect("设置 Ctrl+C 处理失败");
 
-    let config = parse_args().unwrap_or_else(|e| {
-        eprintln!("错误: {e}");
-        eprintln!();
-        print_usage();
-        std::process::exit(1);
-    });
-
-    if let Err(e) = run(config) {
-        eprintln!("错误: {e}");
-        std::process::exit(1);
+    match parse_args() {
+        Ok(Action::ListDevices) => {
+            list_devices();
+        }
+        Ok(Action::Record(config)) => {
+            if let Err(e) = run(config) {
+                eprintln!("错误: {e}");
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("错误: {e}");
+            eprintln!();
+            print_usage();
+            std::process::exit(1);
+        }
     }
+}
+
+/// 列出可用音频输入设备
+fn list_devices() {
+    match capture::list_input_devices() {
+        Ok(devices) => {
+            if devices.is_empty() {
+                eprintln!("没有可用的输入设备");
+            } else {
+                eprintln!("可用输入设备:");
+                for (i, name) in devices.iter().enumerate() {
+                    eprintln!("  [{}] {}", i, name);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("错误: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// 命令行动作
+enum Action {
+    /// 列出设备
+    ListDevices,
+    /// 录制
+    Record(RecordConfig),
 }
 
 fn run(config: RecordConfig) -> Result<(), String> {
@@ -166,8 +200,8 @@ fn run_background(config: &RecordConfig) -> Result<(), String> {
     cmd.arg("-f").arg(config.sample_fmt.as_str());
     cmd.arg("-d").arg(config.duration_secs.to_string());
     cmd.arg("-o").arg(&config.output_path);
-    if let Some(idx) = config.device_index {
-        cmd.arg("-i").arg(idx.to_string());
+    if let Some(ref name) = config.device_name {
+        cmd.arg("-i").arg(name);
     }
 
     // 子进程的标准输入/输出/错误分离，不阻塞父进程
@@ -310,7 +344,8 @@ fn print_usage() {
     eprintln!("  -f, --sample-fmt <FMT>    采样格式: s16 | s32 | f32 (默认: s16)");
     eprintln!("  -d, --duration <SECS>     录制时长秒数 (默认: 120)");
     eprintln!("  -o, --output <PATH>       输出文件路径 (默认: recording.wav)");
-    eprintln!("  -i, --device <INDEX>      输入设备索引 (默认: 系统默认设备)");
+    eprintln!("  -i, --device <NAME>       输入设备名称 (模糊匹配, 默认: 系统默认设备)");
+eprintln!("  -l, --list-devices        列出可用输入设备");
     eprintln!("  -b, --blocking            前台阻塞模式，等待录制完成 (默认: 后台运行)");
     eprintln!("  -h, --help                显示帮助信息");
     eprintln!();
@@ -318,14 +353,14 @@ fn print_usage() {
     eprintln!("  audio-recorder                           # 后台录制麦克风");
     eprintln!("  audio-recorder -s speaker                # 录制扬声器");
     eprintln!("  audio-recorder -b                        # 前台阻塞模式");
-    eprintln!("  audio-recorder -i 1 -o my.wav            # 指定设备1");
+    eprintln!("  audio-recorder -i MacBook -o my.wav         # 模糊匹配设备名");
     eprintln!();
     eprintln!("停止后台录制:");
     eprintln!("  rm .recording.stop                       # 删除停止文件");
     eprintln!("  kill -INT <PID>                          # 发送中断信号");
 }
 
-fn parse_args() -> Result<RecordConfig, String> {
+fn parse_args() -> Result<Action, String> {
     use lexopt::prelude::*;
 
     let mut config = RecordConfig::default();
@@ -378,8 +413,10 @@ fn parse_args() -> Result<RecordConfig, String> {
                     .value()
                     .map_err(|e| format!("--device 需要参数: {e}"))?;
                 let val = val.to_string_lossy().into_owned();
-                config.device_index =
-                    Some(val.parse().map_err(|_| format!("无效的设备索引: {val}"))?);
+                config.device_name = Some(val);
+            }
+            Short('l') | Long("list-devices") => {
+                return Ok(Action::ListDevices);
             }
             Short('b') | Long("blocking") => {
                 config.foreground = true;
@@ -392,5 +429,5 @@ fn parse_args() -> Result<RecordConfig, String> {
         }
     }
 
-    Ok(config)
+    Ok(Action::Record(config))
 }
