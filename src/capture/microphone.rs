@@ -76,7 +76,8 @@ pub fn record_microphone(
             .build_input_stream(
                 &stream_config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64).collect();
+                    // S16 是 16 位整数，范围 -32768~32767，需要归一化到 -1.0~1.0
+                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64 / 32768.0).collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,
@@ -87,7 +88,8 @@ pub fn record_microphone(
             .build_input_stream(
                 &stream_config,
                 move |data: &[i32], _: &cpal::InputCallbackInfo| {
-                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64).collect();
+                    // S32 是 32 位整数，范围 -2147483648~2147483647，需要归一化
+                    let samples: Vec<f64> = data.iter().step_by(num_channels).map(|&s| s as f64 / 2147483648.0).collect();
                     let _ = tx.send(samples);
                 },
                 err_fn,

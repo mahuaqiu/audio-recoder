@@ -19,7 +19,6 @@ pub fn record_speaker(
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
     use windows::Win32::System::Com::*;
-    use windows::Win32::Media::Audio::*;
 
     // 创建通道用于传递初始化结果
     let (init_tx, init_rx) = mpsc::channel();
@@ -38,18 +37,34 @@ pub fn record_speaker(
     eprintln!("正在录制系统音频 (WASAPI loopback)...");
 
     thread::spawn(move || {
-        let result = unsafe {
-            wasapi_loopback_thread(tx_clone, stop_flag_clone)
-        };
+        // 用 catch_unwind 捕获子线程的 panic
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unsafe { wasapi_loopback_thread(tx_clone, stop_flag_clone) }
+        }));
         
         match result {
-            Ok((rate, fmt)) => {
-                eprintln!("WASAPI loopback 录制已启动: {}Hz, {}", rate, fmt.as_str());
-                let _ = init_tx.send(InitResult::Success { sample_rate: rate, sample_fmt: fmt });
+            Ok(inner) => {
+                match inner {
+                    Ok((rate, fmt)) => {
+                        eprintln!("WASAPI loopback 录制已启动: {}Hz, {}", rate, fmt.as_str());
+                        let _ = init_tx.send(InitResult::Success { sample_rate: rate, sample_fmt: fmt });
+                    }
+                    Err(e) => {
+                        eprintln!("WASAPI loopback 录制错误: {e}");
+                        let _ = init_tx.send(InitResult::Failed(e));
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("WASAPI loopback 录制错误: {e}");
-                let _ = init_tx.send(InitResult::Failed(e));
+            Err(panic_payload) => {
+                let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                eprintln!("WASAPI loopback 子线程 panic: {msg}");
+                let _ = init_tx.send(InitResult::Failed(format!("子线程 panic: {}", msg)));
             }
         }
     });

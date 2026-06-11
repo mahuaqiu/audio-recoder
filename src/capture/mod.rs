@@ -22,8 +22,6 @@ use std::time::Duration;
 /// 录制状态
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RecordStatus {
-    /// 初始化中
-    Initializing,
     /// 正在录制
     Recording,
     /// 已停止
@@ -32,7 +30,8 @@ pub enum RecordStatus {
     Failed,
 }
 
-/// 扬声器初始化状态
+#[allow(dead_code)]
+/// 扬声器初始化状态（仅用于 macOS）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum InitStatus {
     Success,
@@ -69,6 +68,7 @@ impl StopHandle {
     }
 
     /// 创建扬声器录制的停止句柄（带初始化状态接收器）
+    #[allow(dead_code)]
     pub fn new_speaker_with_status(
         stop_flag: Arc<AtomicBool>,
         init_rx: mpsc::Receiver<InitStatus>,
@@ -78,7 +78,7 @@ impl StopHandle {
         Self {
             stream: None,
             stop_flag: Some(stop_flag),
-            status: Arc::new(AtomicU8::new(RecordStatus::Initializing as u8)),
+            status: Arc::new(AtomicU8::new(RecordStatus::Recording as u8)),
             init_rx: Some(init_rx),
             actual_sample_rate: sample_rate,
             actual_sample_fmt: sample_fmt,
