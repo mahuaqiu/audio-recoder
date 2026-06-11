@@ -11,16 +11,16 @@ static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 // 记录文件路径
 fn get_pid_file(output_path: &str) -> PathBuf {
-    let stem = PathBuf::from(output_path)
-        .file_stem()
+    let path = PathBuf::from(output_path);
+    let stem = path.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("recording");
     PathBuf::from(format!(".{}.pid", stem))
 }
 
 fn get_stop_file(output_path: &str) -> PathBuf {
-    let stem = PathBuf::from(output_path)
-        .file_stem()
+    let path = PathBuf::from(output_path);
+    let stem = path.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("recording");
     PathBuf::from(format!(".{}.stop", stem))
@@ -125,6 +125,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
         // 后台模式：监控停止文件
         let stop_flag = std::sync::Arc::new(AtomicBool::new(false));
         let stop_flag_clone = stop_flag.clone();
+        let stop_file_monitor = stop_file.clone();
 
         // 启动监控线程
         std::thread::spawn(move || {
@@ -133,7 +134,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
                 std::thread::sleep(Duration::from_millis(200));
                 
                 // 检查停止文件是否还存在
-                if !stop_file.exists() {
+                if !stop_file_monitor.exists() {
                     eprintln!("\n检测到停止文件已删除，正在停止...");
                     break;
                 }
