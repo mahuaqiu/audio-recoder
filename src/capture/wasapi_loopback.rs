@@ -21,7 +21,6 @@ pub fn record_speaker(
     _config: &RecordConfig,
     tx: mpsc::Sender<Vec<f64>>,
 ) -> Result<StopHandle, String> {
-    // 创建通道用于传递初始化结果
     let (init_tx, init_rx) = mpsc::channel();
 
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -33,7 +32,6 @@ pub fn record_speaker(
     thread::spawn(move || {
         eprintln!("[WASAPI] 子线程启动，开始初始化...");
 
-        // 在子线程中初始化 COM（STA 模式，WASAPI loopback 推荐）
         unsafe {
             use windows::Win32::System::Com::*;
             eprintln!("[WASAPI] 正在初始化 COM...");
@@ -47,25 +45,18 @@ pub fn record_speaker(
 
         eprintln!("[WASAPI] 准备调用 wasapi_loopback_thread...");
 
-        // 用 catch_unwind 捕获子线程的 panic
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
             wasapi_loopback_thread(tx_clone, stop_flag_clone, init_tx)
         }));
 
-        // 子线程结束后释放 COM
         unsafe {
             windows::Win32::System::Com::CoUninitialize();
         }
 
         match result {
             Ok(inner) => {
-                match inner {
-                    Ok(()) => {
-                        // 初始化成功已在 wasapi_loopback_thread 内部通知主线程
-                    }
-                    Err(e) => {
-                        eprintln!("WASAPI loopback 录制错误: {e}");
-                    }
+                if let Err(e) = inner {
+                    eprintln!("WASAPI loopback 录制错误: {e}");
                 }
             }
             Err(panic_payload) => {
@@ -82,7 +73,6 @@ pub fn record_speaker(
         eprintln!("[WASAPI] 子线程结束");
     });
 
-    // 等待初始化完成（最多 10 秒）
     let init_result = init_rx
         .recv_timeout(Duration::from_secs(10))
         .map_err(|e| format!("等待 WASAPI 初始化超时: {e}"))?;
@@ -163,7 +153,6 @@ unsafe fn wasapi_loopback_thread(
     })?;
     eprintln!("[WASAPI] 音频客户端激活成功");
 
-    // 获取设备混音格式
     eprintln!("[WASAPI] 正在获取混音格式...");
     let mix_format_ptr = audio_client.GetMixFormat().map_err(|e| {
         let msg = format!("获取设备混音格式失败: {e}");
@@ -178,7 +167,6 @@ unsafe fn wasapi_loopback_thread(
     let format_tag = fmt.wFormatTag;
     let num_channels = fmt.nChannels;
 
-    // 判断采样格式
     let sample_fmt = if format_tag == 3 {
         SampleFmt::F32
     } else if format_tag == 65534 {
@@ -200,13 +188,12 @@ unsafe fn wasapi_loopback_thread(
         sample_rate, bits_per_sample, format_tag, num_channels
     );
 
-    // 初始化音频客户端（loopback 模式必须用混音格式）
     eprintln!("[WASAPI] 正在初始化音频客户端...");
     audio_client
         .Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK,
-            10_000_000, // 1秒缓冲
+            10_000_000,
             0,
             mix_format_ptr,
             None,
@@ -234,7 +221,6 @@ unsafe fn wasapi_loopback_thread(
     })?;
     eprintln!("[WASAPI] 音频捕获已启动");
 
-    // 通知主线程初始化成功
     eprintln!(
         "[WASAPI] 通知主线程初始化成功: {}Hz, {}",
         sample_rate,
@@ -245,19 +231,15 @@ unsafe fn wasapi_loopback_thread(
         sample_fmt,
     });
 
-    // 淡入淡出的帧数（约 5ms 的样本量，避免爆破音）
-    let fade_frames = (sample_rate as usize) / 200; // 5ms
-                                                    // 静音检测阈值（rms < 0.001 视为静音）
+    // 淡入淡出帧数（约 5ms）
+    let fade_frames = (sample_rate as usize) / 200;
     let silence_threshold = 0.001;
 
-    // 状态追踪
     let mut frames_written: u64 = 0;
-    let mut was_silent = true; // 初始状态视为静音（等待第一段音频）
+    let mut was_silent = true;
     let start_time = Instant::now();
 
-    // 录制循环
     while !stop_flag.load(Ordering::Relaxed) {
-        // 根据流逝时间计算应该有多少帧，静音期间填充
         let elapsed_secs = start_time.elapsed().as_secs_f64();
         let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
 
@@ -267,7 +249,7 @@ unsafe fn wasapi_loopback_thread(
                 let silence = vec![0.0f64; silence_frames as usize];
                 let _ = tx.send(silence);
                 frames_written += silence_frames;
-                was_silent = true; // 填充静音后状态保持为静音
+                was_silent = true;
             }
         }
 
@@ -285,7 +267,6 @@ unsafe fn wasapi_loopback_thread(
                 .map_err(|e| format!("获取缓冲区失败: {e}"))?;
 
             if num_frames > 0 && !data_ptr.is_null() {
-                // 解析多通道交错数据，只取第一个通道
                 let mut samples: Vec<f64> = match sample_fmt {
                     SampleFmt::S16 => {
                         let ptr = data_ptr as *const i16;
@@ -316,21 +297,15 @@ unsafe fn wasapi_loopback_thread(
                     }
                 };
 
-                // 检测当前音频段是否静音
                 let current_silent = is_silent(&samples, silence_threshold);
 
-                // 状态转换时应用淡入淡出
+                // 静音 → 有声音：淡入
                 if was_silent && !current_silent {
-                    // 静音 -> 有声音：淡入
                     fade_in(&mut samples, fade_frames);
-                } else if !was_silent && current_silent {
-                    // 有声音 -> 静音：淡出（本次数据本身是静音，不处理）
-                } else if !was_silent && !current_silent {
-                    // 持续有声音：检查开头几个样本是否接近 0，若是则淡入（防止开头有突变）
-                    let first_samples = &samples[..fade_frames.min(samples.len())];
-                    if first_samples.iter().all(|s| s.abs() < 0.01) {
-                        fade_in(&mut samples, fade_frames);
-                    }
+                }
+                // 有声音 → 静音：淡出
+                else if !was_silent && current_silent {
+                    fade_out(&mut samples, fade_frames);
                 }
 
                 let _ = tx.send(samples);
@@ -350,7 +325,7 @@ unsafe fn wasapi_loopback_thread(
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // 录制结束前，补齐最后的静音
+    // 录制结束前补齐静音
     let elapsed_secs = start_time.elapsed().as_secs_f64();
     let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
     if expected_frames > frames_written {
@@ -360,8 +335,6 @@ unsafe fn wasapi_loopback_thread(
     }
 
     let _ = audio_client.Stop();
-
-    // 释放混音格式内存
     CoTaskMemFree(Some(mix_format_ptr as *const _));
 
     Ok(())
