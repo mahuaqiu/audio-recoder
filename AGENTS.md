@@ -19,14 +19,17 @@ cargo build --release
 ## 运行
 
 ```bash
-# 录制麦克风（默认）
+# 后台录制麦克风（默认）
 ./audio-recorder -o output.wav
 
+# 前台阻塞模式录制
+./audio-recorder -b -o output.wav
+
 # 录制系统音频（扬声器）
-./audio-recorder --source speaker -o output.wav
+./audio-recorder -s speaker -o output.wav
 
 # 指定参数
-./audio-recorder --source microphone --sample-rate 48000 --sample-fmt f32 --duration 60 -o output.wav
+./audio-recorder -s microphone -r 48000 -f f32 -d 60 -o output.wav
 ```
 
 ### 参数说明
@@ -38,7 +41,78 @@ cargo build --release
 | `--sample-fmt` | `-f` | s16 | 采样格式: s16, s32, f32 |
 | `--duration` | `-d` | 120 | 录制时长 (秒) |
 | `--output` | `-o` | recording.wav | 输出文件路径 |
+| `--device` | `-i` | (系统默认) | 输入设备索引 (从 0 开始) |
+| `--blocking` | `-b` | 后台模式 | 前台阻塞模式，等待录制完成 |
 | `--help` | `-h` | | 显示帮助 |
+
+### 参数详细说明
+
+#### -s, --source
+- `microphone` / `mic`: 麦克风录制
+- `speaker` / `spk`: 系统音频录制（扬声器）
+
+#### -r, --sample-rate
+- 常用值: 8000, 11025, 16000, 22050, 32000, 44100, 48000, 96000
+- 如果设备不支持请求的采样率，会自动适配到最接近的可用值
+
+#### -f, --sample-fmt
+- `s16`: 16 位整数
+- `s32`: 32 位整数  
+- `f32`: 32 位浮点
+- 如果设备不支持请求的格式，会自动适配
+
+#### -i, --device
+- 指定输入设备索引（从 0 开始）
+- 不指定则使用系统默认设备
+- 可通过列出设备获取索引（待实现）
+
+#### -b, --blocking
+- 不加此参数: 后台模式，进程立即返回
+- 加此参数: 前台阻塞模式，等待录制完成
+
+## 后台模式使用
+
+### 启动后台录制
+
+```bash
+# 后台录制麦克风
+./audio-recorder -o myRecording.wav
+# 输出类似:
+# 正在录制... (源: 麦克风, 采样率: 16000Hz, 格式: s16, 时长: 120s)
+# 麦克风设备: 麦克风阵列（适用于数字麦克灵的英特尔@ 智音技术）
+# 后台录制已启动，PID: 12345
+# 输出文件: myRecording.wav
+# PID 文件: .myRecording.pid
+# 停止文件: .myRecording.stop (删除此文件可停止录制)
+```
+
+### 停止后台录制
+
+有三种方式停止后台录制：
+
+| 方式 | 命令 | 说明 |
+|------|------|------|
+| 删除停止文件 | `rm .myRecording.stop` | 推荐，优雅停止 |
+| 发送中断信号 | `kill -INT 12345` | 等同于 Ctrl+C |
+| 杀进程 | `kill 12345` | 不推荐，可能损坏 WAV |
+
+### 查看运行状态
+
+```bash
+# 查看正在运行的录制
+ls -la .*.stop
+
+# 查看 PID 文件
+cat .myRecording.pid
+```
+
+### 自动适配
+
+当请求的采样率或格式设备不支持时，会自动适配：
+
+```
+提示: 设备不支持请求的参数，已自动适配 - 采样率: 48000Hz, 格式: f32
+```
 
 ## 平台支持
 
@@ -47,6 +121,17 @@ cargo build --release
 | Windows | ✅ cpal | ✅ WASAPI loopback |
 | macOS 13.0+ | ✅ cpal | ✅ ScreenCaptureKit |
 | macOS 12.x | ✅ cpal | ❌ 需要 macOS 13.0+ |
+
+### Windows WASAPI 注意事项
+
+- 需要 Windows 7 或更高版本
+- 扬声器录制使用 WASAPI loopback，需要设备未被独占
+- 错误码 `0x88890008` (AUDCLNT_E_DEVICE_IN_USE) 表示设备被其他应用占用
+
+### macOS 注意事项
+
+- 扬声器录制需要 macOS 13.0+ 和屏幕录制权限
+- 首次使用时会请求屏幕录制权限，需在系统偏好设置中授权
 
 ## 目录结构
 
@@ -79,6 +164,8 @@ audio-recoder/
 2. **采样格式转换** - 内部统一转为 f64 再写入 WAV
 3. **线程安全** - 音频数据通过 mpsc channel 传递
 4. **错误处理** - 使用 Result<String, String> 传播错误
+5. **后台模式** - 默认���台运行，使用停止文件机制实现优雅停止
+6. **自动适配** - 当设备不支持请求的参数时，自动选择最接近的配置
 
 ## 打包
 

@@ -1,10 +1,11 @@
 //! Windows 扬声器录制 - 使用 WASAPI loopback 捕获系统音频
 
-use crate::capture::{RecordConfig, StopHandle};
+use crate::capture::{RecordConfig, StopHandle, InitStatus};
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 /// 使用 WASAPI loopback 录制扬声器音频（仅 Windows）
 pub fn record_speaker(
@@ -13,11 +14,15 @@ pub fn record_speaker(
 ) -> Result<StopHandle, String> {
     use windows::Win32::System::Com::*;
 
+    // 创建通道用于传递初始化状态
+    let (init_tx, init_rx) = mpsc::channel();
+
     unsafe {
-        // 初始化 COM
-        CoInitializeEx(None, COINIT_MULTITHREADED)
-            .ok()
-            .map_err(|e| format!("COM 初始化失败: {e}"))?;
+        // 初始化 COM（每个线程需要单独初始化）
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if hr.is_err() {
+            // COM 可能已经初始化过了，忽略错误
+        }
     }
 
     // 创建停止标志
@@ -33,15 +38,26 @@ pub fn record_speaker(
         let result = unsafe {
             wasapi_loopback_thread(sample_rate, sample_fmt, tx_clone, stop_flag_clone)
         };
-        if let Err(e) = result {
-            eprintln!("WASAPI loopback 录制错误: {e}");
+        
+        // 报告初始化/运行结果
+        match result {
+            Ok(_) => {
+                let _ = init_tx.send(InitStatus::Success);
+            }
+            Err(e) => {
+                eprintln!("WASAPI loopback 录制错误: {e}");
+                let _ = init_tx.send(InitStatus::Failed);
+            }
         }
     });
 
+    // 等待初始化结果
     eprintln!("正在录制系统音频 (WASAPI loopback)...");
-
-    // 返回带有停止标志的 StopHandle
-    Ok(StopHandle::new_speaker(stop_flag))
+    
+    // 返回带状态的 StopHandle
+    let handle = StopHandle::new_speaker_with_status(stop_flag, init_rx);
+    
+    Ok(handle)
 }
 
 unsafe fn wasapi_loopback_thread(
@@ -53,7 +69,7 @@ unsafe fn wasapi_loopback_thread(
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
-    // 获取默认音频渲染设备（扬声器）
+    // 获取默认音频渲染���备（扬声器）
     let enumerator: IMMDeviceEnumerator =
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
             .map_err(|e| format!("创建设备枚举器失败: {e}"))?;
@@ -166,7 +182,7 @@ unsafe fn wasapi_loopback_thread(
         }
 
         // 短暂休眠避免 CPU 空转
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(Duration::from_millis(10));
     }
 
     // 停止录制

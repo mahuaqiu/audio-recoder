@@ -2,6 +2,7 @@
 //! 需要 macOS 13.0+ 和屏幕录制权限
 
 use crate::capture::{RecordConfig, StopHandle};
+use crate::capture::InitStatus;
 use screencapturekit::prelude::*;
 use std::sync::mpsc;
 use std::sync::{Arc, AtomicBool};
@@ -16,8 +17,11 @@ pub fn record_speaker(
 ) -> Result<StopHandle, String> {
     // 创建停止标志
     let stop_flag = Arc::new(AtomicBool::new(false));
+    
+    // 创建通道用于传递初始化状态
+    let (init_tx, init_rx) = mpsc::channel();
 
-    // 克隆 tx 和 stop_flag 用于线程中
+    // 克隆用于线程中
     let tx_clone = tx.clone();
     let stop_flag_clone = stop_flag.clone();
 
@@ -113,13 +117,20 @@ pub fn record_speaker(
             Ok(())
         })();
 
-        if let Err(e) = result {
-            eprintln!("扬声器录制错误: {e}");
+        // 报告初始化/运行结果
+        match result {
+            Ok(_) => {
+                let _ = init_tx.send(InitStatus::Success);
+            }
+            Err(e) => {
+                eprintln!("扬声器录制错误: {e}");
+                let _ = init_tx.send(InitStatus::Failed);
+            }
         }
     });
 
     eprintln!("正在录制系统音频... (需要 macOS 13.0+ 和屏幕录制权限)");
 
-    // 返回一个带有停止标志的 StopHandle
-    Ok(StopHandle::new_speaker(stop_flag))
+    // 返回带状态的 StopHandle
+    Ok(StopHandle::new_speaker_with_status(stop_flag, init_rx))
 }
