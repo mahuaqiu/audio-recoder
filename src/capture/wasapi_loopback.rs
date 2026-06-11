@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 初始化结果
 enum InitResult {
@@ -212,9 +212,7 @@ unsafe fn wasapi_loopback_thread(
     })?;
     eprintln!("[WASAPI] 音频捕获已启动");
 
-    // 关键修复：在进入录制循环前，立即通知主线程初始化成功
-    // 之前的 bug 是 init_tx.send 在函数返回后才执行，
-    // 但 wasapi_loopback_thread 是无限循环不会返回，导致主线程超时
+    // 在进入录制循环前，立即通知主线程初始化成功
     eprintln!(
         "[WASAPI] 通知主线程初始化成功: {}Hz, {}",
         sample_rate,
@@ -225,8 +223,26 @@ unsafe fn wasapi_loopback_thread(
         sample_fmt,
     });
 
+    // 帧计数器：追踪已经发送了多少帧，用于静音填充
+    let mut frames_written: u64 = 0;
+    let start_time = Instant::now();
+
     // 录制循环
     while !stop_flag.load(Ordering::Relaxed) {
+        // 根据已经流逝的时间计算应该有多少帧
+        let elapsed_secs = start_time.elapsed().as_secs_f64();
+        let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
+
+        // 如果有帧缺口（静音期间 WASAPI 不产生数据包），用静音填充
+        if expected_frames > frames_written {
+            let silence_frames = expected_frames - frames_written;
+            if silence_frames > 0 {
+                let silence = vec![0.0f64; silence_frames as usize];
+                let _ = tx.send(silence);
+                frames_written += silence_frames;
+            }
+        }
+
         let mut packet_size = capture_client
             .GetNextPacketSize()
             .map_err(|e| format!("获取数据包大小失败: {e}"))?;
@@ -273,6 +289,7 @@ unsafe fn wasapi_loopback_thread(
                 };
 
                 let _ = tx.send(samples);
+                frames_written += num_frames as u64;
             }
 
             capture_client
@@ -285,6 +302,15 @@ unsafe fn wasapi_loopback_thread(
         }
 
         std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // 录制结束前，补齐最后一段静音（从最后一次写入到此刻）
+    let elapsed_secs = start_time.elapsed().as_secs_f64();
+    let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
+    if expected_frames > frames_written {
+        let silence_frames = expected_frames - frames_written;
+        let silence = vec![0.0f64; silence_frames as usize];
+        let _ = tx.send(silence);
     }
 
     let _ = audio_client.Stop();
