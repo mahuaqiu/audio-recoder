@@ -65,8 +65,6 @@ pub fn record_speaker(
                     }
                     Err(e) => {
                         eprintln!("WASAPI loopback 录制错误: {e}");
-                        // 错误也应该在 wasapi_loopback_thread 内部已通知，
-                        // 但以防万一这里也尝试发送（init_tx 可能已被消费）
                     }
                 }
             }
@@ -79,7 +77,6 @@ pub fn record_speaker(
                     "Unknown panic".to_string()
                 };
                 eprintln!("WASAPI loopback 子线程 panic: {msg}");
-                // panic 时 init_tx 可能还没发送，但通道可能已关闭，忽略错误
             }
         }
         eprintln!("[WASAPI] 子线程结束");
@@ -96,6 +93,36 @@ pub fn record_speaker(
             sample_fmt,
         } => Ok(StopHandle::new_speaker(stop_flag, sample_rate, sample_fmt)),
         InitResult::Failed(e) => Err(e),
+    }
+}
+
+/// 检测样本块是否"有声音"（能量超过阈值）
+fn is_silent(samples: &[f64], threshold: f64) -> bool {
+    let sum: f64 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum / samples.len() as f64).sqrt();
+    rms < threshold
+}
+
+/// 对样本应用淡入：开头 N 个样本从 0 渐变到 1
+fn fade_in(samples: &mut [f64], fade_frames: usize) {
+    let n = fade_frames.min(samples.len());
+    for (i, sample) in samples.iter_mut().enumerate() {
+        if i < n {
+            let gain = i as f64 / n as f64;
+            *sample *= gain;
+        }
+    }
+}
+
+/// 对样本应用淡出：最后 N 个样本从 1 渐变到 0
+fn fade_out(samples: &mut [f64], fade_frames: usize) {
+    let n = fade_frames.min(samples.len());
+    let len = samples.len();
+    for (i, sample) in samples.iter_mut().enumerate() {
+        if i >= len - n {
+            let gain = (len - i) as f64 / n as f64;
+            *sample *= gain;
+        }
     }
 }
 
@@ -151,15 +178,10 @@ unsafe fn wasapi_loopback_thread(
     let format_tag = fmt.wFormatTag;
     let num_channels = fmt.nChannels;
 
-    // WAVE_FORMAT_EXTENSIBLE (0xFFFE = 65534) 是 Windows 音频引擎的标准格式
-    // 需要根据 bits_per_sample 判断实际格式
+    // 判断采样格式
     let sample_fmt = if format_tag == 3 {
-        // IEEE_FLOAT → f32
         SampleFmt::F32
     } else if format_tag == 65534 {
-        // WAVE_FORMAT_EXTENSIBLE，需要检查 SubFormat GUID
-        // IEEE_FLOAT GUID: {00000003-0000-0010-8000-00aa00389b71}
-        // 简化判断：32bit EXTENSIBLE 默认按 f32 处理（Windows 音频引擎默认）
         if bits_per_sample == 32 {
             SampleFmt::F32
         } else if bits_per_sample == 16 {
@@ -178,7 +200,7 @@ unsafe fn wasapi_loopback_thread(
         sample_rate, bits_per_sample, format_tag, num_channels
     );
 
-    // 使用设备混音格式初始化（loopback 模式必须用混音格式）
+    // 初始化音频客户端（loopback 模式必须用混音格式）
     eprintln!("[WASAPI] 正在初始化音频客户端...");
     audio_client
         .Initialize(
@@ -212,7 +234,7 @@ unsafe fn wasapi_loopback_thread(
     })?;
     eprintln!("[WASAPI] 音频捕获已启动");
 
-    // 在进入录制循环前，立即通知主线程初始化成功
+    // 通知主线程初始化成功
     eprintln!(
         "[WASAPI] 通知主线程初始化成功: {}Hz, {}",
         sample_rate,
@@ -223,23 +245,29 @@ unsafe fn wasapi_loopback_thread(
         sample_fmt,
     });
 
-    // 帧计数器：追踪已经发送了多少帧，用于静音填充
+    // 淡入淡出的帧数（约 5ms 的样本量，避免爆破音）
+    let fade_frames = (sample_rate as usize) / 200; // 5ms
+                                                    // 静音检测阈值（rms < 0.001 视为静音）
+    let silence_threshold = 0.001;
+
+    // 状态追踪
     let mut frames_written: u64 = 0;
+    let mut was_silent = true; // 初始状态视为静音（等待第一段音频）
     let start_time = Instant::now();
 
     // 录制循环
     while !stop_flag.load(Ordering::Relaxed) {
-        // 根据已经流逝的时间计算应该有多少帧
+        // 根据流逝时间计算应该有多少帧，静音期间填充
         let elapsed_secs = start_time.elapsed().as_secs_f64();
         let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
 
-        // 如果有帧缺口（静音期间 WASAPI 不产生数据包），用静音填充
         if expected_frames > frames_written {
             let silence_frames = expected_frames - frames_written;
             if silence_frames > 0 {
                 let silence = vec![0.0f64; silence_frames as usize];
                 let _ = tx.send(silence);
                 frames_written += silence_frames;
+                was_silent = true; // 填充静音后状态保持为静音
             }
         }
 
@@ -257,14 +285,14 @@ unsafe fn wasapi_loopback_thread(
                 .map_err(|e| format!("获取缓冲区失败: {e}"))?;
 
             if num_frames > 0 && !data_ptr.is_null() {
-                // WASAPI 数据是多通道交错的，只取第一个通道
-                let samples = match sample_fmt {
+                // 解析多通道交错数据，只取第一个通道
+                let mut samples: Vec<f64> = match sample_fmt {
                     SampleFmt::S16 => {
                         let ptr = data_ptr as *const i16;
                         (0..num_frames)
                             .map(|i| {
                                 let v = ptr.add((i as usize) * (num_channels as usize)).read();
-                                v as f64 / 32768.0 // 归一化到 [-1.0, 1.0]
+                                v as f64 / 32768.0
                             })
                             .collect()
                     }
@@ -273,7 +301,7 @@ unsafe fn wasapi_loopback_thread(
                         (0..num_frames)
                             .map(|i| {
                                 let v = ptr.add((i as usize) * (num_channels as usize)).read();
-                                v as f64 / 2147483648.0 // 归一化到 [-1.0, 1.0]
+                                v as f64 / 2147483648.0
                             })
                             .collect()
                     }
@@ -282,14 +310,32 @@ unsafe fn wasapi_loopback_thread(
                         (0..num_frames)
                             .map(|i| {
                                 let v = ptr.add((i as usize) * (num_channels as usize)).read();
-                                v as f64 // f32 已经是 [-1.0, 1.0]
+                                v as f64
                             })
                             .collect()
                     }
                 };
 
+                // 检测当前音频段是否静音
+                let current_silent = is_silent(&samples, silence_threshold);
+
+                // 状态转换时应用淡入淡出
+                if was_silent && !current_silent {
+                    // 静音 -> 有声音：淡入
+                    fade_in(&mut samples, fade_frames);
+                } else if !was_silent && current_silent {
+                    // 有声音 -> 静音：淡出（本次数据本身是静音，不处理）
+                } else if !was_silent && !current_silent {
+                    // 持续有声音：检查开头几个样本是否接近 0，若是则淡入（防止开头有突变）
+                    let first_samples = &samples[..fade_frames.min(samples.len())];
+                    if first_samples.iter().all(|s| s.abs() < 0.01) {
+                        fade_in(&mut samples, fade_frames);
+                    }
+                }
+
                 let _ = tx.send(samples);
                 frames_written += num_frames as u64;
+                was_silent = current_silent;
             }
 
             capture_client
@@ -304,7 +350,7 @@ unsafe fn wasapi_loopback_thread(
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    // 录制结束前，补齐最后一段静音（从最后一次写入到此刻）
+    // 录制结束前，补齐最后的静音
     let elapsed_secs = start_time.elapsed().as_secs_f64();
     let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
     if expected_frames > frames_written {
