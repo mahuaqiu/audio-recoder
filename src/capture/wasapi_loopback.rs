@@ -174,13 +174,17 @@ unsafe fn wasapi_loopback_thread(
         .map_err(|e| format!("初始化音频客户端失败: {e}"))?;
     eprintln!("[WASAPI] 音频客户端初始化成功");
 
+    eprintln!("[WASAPI] 正在获取捕获客户端...");
     let capture_client: IAudioCaptureClient = audio_client
         .GetService()
         .map_err(|e| format!("获取捕获客户端失败: {e}"))?;
+    eprintln!("[WASAPI] 获取捕获客户端成功");
 
+    eprintln!("[WASAPI] 正在启动音频捕获...");
     audio_client
         .Start()
         .map_err(|e| format!("启动音频捕获失败: {e}"))?;
+    eprintln!("[WASAPI] 音频捕获已启动");
 
     while !stop_flag.load(Ordering::Relaxed) {
         let mut packet_size = capture_client
