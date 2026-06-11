@@ -71,12 +71,25 @@ fn run(config: RecordConfig) -> Result<(), String> {
         return Err("音频录制初始化失败".to_string());
     }
 
+    // 获取实际使用的采样率和格式（设备可能自动适配了）
+    let actual_sample_rate = stop_handle.actual_sample_rate;
+    let actual_sample_fmt = stop_handle.actual_sample_fmt;
+    let target_sample_rate = config.sample_rate;
+    let target_sample_fmt = config.sample_fmt;
+
+    // 如果实际参数与请求参数不同，提示用户
+    if actual_sample_rate != config.sample_rate || actual_sample_fmt != config.sample_fmt {
+        eprintln!(
+            "提示: 自动适配后，设备实际使用 {}Hz {}，\n      将重采样转换为目标 {}Hz {}",
+            actual_sample_rate, actual_sample_fmt.as_str(),
+            target_sample_rate, target_sample_fmt.as_str()
+        );
+    }
+
     // 启动 WAV 写入线程
     let output_path = config.output_path.clone();
-    let sample_rate = config.sample_rate;
-    let sample_fmt = config.sample_fmt;
     let writer_thread = std::thread::spawn(move || {
-        wav_writer_loop(rx, &output_path, sample_rate, sample_fmt)
+        wav_writer_loop(rx, &output_path, actual_sample_rate, actual_sample_fmt, target_sample_rate, target_sample_fmt)
     });
 
     // 前台模式：阻塞等待录制完成
@@ -165,35 +178,46 @@ fn run(config: RecordConfig) -> Result<(), String> {
 fn wav_writer_loop(
     rx: mpsc::Receiver<Vec<f64>>,
     output_path: &str,
-    sample_rate: u32,
-    sample_fmt: SampleFmt,
+    actual_rate: u32,
+    actual_fmt: SampleFmt,
+    target_rate: u32,
+    target_fmt: SampleFmt,
 ) -> Result<(), String> {
+    // 使用实际采样率写 WAV header，但用目标格式写数据
     let spec = hound::WavSpec {
         channels: 1,
-        sample_rate,
-        bits_per_sample: sample_fmt.bits_per_sample(),
-        sample_format: sample_fmt.to_hound_sample_format(),
+        sample_rate: actual_rate,
+        bits_per_sample: target_fmt.bits_per_sample(),
+        sample_format: target_fmt.to_hound_sample_format(),
     };
 
     let mut writer = hound::WavWriter::create(output_path, spec)
         .map_err(|e| format!("创建 WAV 文件失败: {e}"))?;
 
     while let Ok(samples) = rx.recv() {
-        match sample_fmt {
+        // 重采样到目标采样率
+        let resampled = if actual_rate != target_rate {
+            resample(&samples, actual_rate, target_rate)
+        } else {
+            samples
+        };
+
+        // 转换为目标格式并写入
+        match target_fmt {
             SampleFmt::S16 => {
-                for s in &samples {
+                for s in &resampled {
                     let val = (*s).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
                     writer.write_sample(val).map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
             SampleFmt::S32 => {
-                for s in &samples {
+                for s in &resampled {
                     let val = (*s).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
                     writer.write_sample(val).map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
             SampleFmt::F32 => {
-                for s in &samples {
+                for s in &resampled {
                     writer.write_sample(*s as f32).map_err(|e| format!("写入采样失败: {e}"))?;
                 }
             }
@@ -202,6 +226,29 @@ fn wav_writer_loop(
 
     writer.flush().map_err(|e| format!("flush WAV 文件失败: {e}"))?;
     Ok(())
+}
+
+/// 线性插值重采样
+fn resample(samples: &[f64], from_rate: u32, to_rate: u32) -> Vec<f64> {
+    if samples.is_empty() || from_rate == to_rate {
+        return samples.to_vec();
+    }
+
+    let ratio = to_rate as f64 / from_rate as f64;
+    let new_len = ((samples.len() as f64) * ratio).ceil() as usize;
+    let mut result = Vec::with_capacity(new_len);
+
+    for i in 0..new_len {
+        let src_idx = i as f64 / ratio;
+        let idx0 = src_idx.floor() as usize;
+        let idx1 = (idx0 + 1).min(samples.len() - 1);
+        let frac = src_idx.fract();
+
+        let val = samples[idx0] * (1.0 - frac) + samples[idx1] * frac;
+        result.push(val);
+    }
+
+    result
 }
 
 fn print_usage() {

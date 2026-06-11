@@ -95,7 +95,7 @@ pub fn record_microphone(
 
     stream.play().map_err(|e| format!("启动音频流失败: {e}"))?;
 
-    Ok(StopHandle::new_microphone(stream))
+    Ok(StopHandle::new_microphone(stream, used_sample_rate, used_sample_fmt))
 }
 
 /// 从支持的配置范围中找到最佳匹配，优先精确匹配，然后 fallback

@@ -49,16 +49,22 @@ pub struct StopHandle {
     status: Arc<AtomicU8>,
     /// 初始化结果接收器（仅用于扬声器）
     init_rx: Option<mpsc::Receiver<InitStatus>>,
+    /// 实际使用的采样率
+    pub actual_sample_rate: u32,
+    /// 实际使用的采样格式
+    pub actual_sample_fmt: SampleFmt,
 }
 
 impl StopHandle {
     /// 创建麦克风录制的停止句柄
-    pub fn new_microphone(stream: cpal::Stream) -> Self {
+    pub fn new_microphone(stream: cpal::Stream, sample_rate: u32, sample_fmt: SampleFmt) -> Self {
         Self {
             stream: Some(stream),
             stop_flag: None,
             status: Arc::new(AtomicU8::new(RecordStatus::Recording as u8)),
             init_rx: None,
+            actual_sample_rate: sample_rate,
+            actual_sample_fmt: sample_fmt,
         }
     }
 
@@ -66,12 +72,16 @@ impl StopHandle {
     pub fn new_speaker_with_status(
         stop_flag: Arc<AtomicBool>,
         init_rx: mpsc::Receiver<InitStatus>,
+        sample_rate: u32,
+        sample_fmt: SampleFmt,
     ) -> Self {
         Self {
             stream: None,
             stop_flag: Some(stop_flag),
             status: Arc::new(AtomicU8::new(RecordStatus::Initializing as u8)),
             init_rx: Some(init_rx),
+            actual_sample_rate: sample_rate,
+            actual_sample_fmt: sample_fmt,
         }
     }
 
