@@ -1,15 +1,18 @@
 //! Windows 扬声器录制 - 使用 WASAPI loopback 捕获系统音频
 
-use crate::capture::{StopHandle, SampleFmt, RecordConfig};
-use std::sync::mpsc;
+use crate::capture::{RecordConfig, SampleFmt, StopHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 /// 初始化结果
 enum InitResult {
-    Success { sample_rate: u32, sample_fmt: SampleFmt },
+    Success {
+        sample_rate: u32,
+        sample_fmt: SampleFmt,
+    },
     Failed(String),
 }
 
@@ -45,8 +48,8 @@ pub fn record_speaker(
         eprintln!("[WASAPI] 准备调用 wasapi_loopback_thread...");
 
         // 用 catch_unwind 捕获子线程的 panic
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            unsafe { wasapi_loopback_thread(tx_clone, stop_flag_clone) }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            wasapi_loopback_thread(tx_clone, stop_flag_clone, init_tx)
         }));
 
         // 子线程结束后释放 COM
@@ -57,13 +60,13 @@ pub fn record_speaker(
         match result {
             Ok(inner) => {
                 match inner {
-                    Ok((rate, fmt)) => {
-                        eprintln!("WASAPI loopback 录制已启动: {}Hz, {}", rate, fmt.as_str());
-                        let _ = init_tx.send(InitResult::Success { sample_rate: rate, sample_fmt: fmt });
+                    Ok(()) => {
+                        // 初始化成功已在 wasapi_loopback_thread 内部通知主线程
                     }
                     Err(e) => {
                         eprintln!("WASAPI loopback 录制错误: {e}");
-                        let _ = init_tx.send(InitResult::Failed(e));
+                        // 错误也应该在 wasapi_loopback_thread 内部已通知，
+                        // 但以防万一这里也尝试发送（init_tx 可能已被消费）
                     }
                 }
             }
@@ -76,20 +79,22 @@ pub fn record_speaker(
                     "Unknown panic".to_string()
                 };
                 eprintln!("WASAPI loopback 子线程 panic: {msg}");
-                let _ = init_tx.send(InitResult::Failed(format!("子线程 panic: {}", msg)));
+                // panic 时 init_tx 可能还没发送，但通道可能已关闭，忽略错误
             }
         }
         eprintln!("[WASAPI] 子线程结束");
     });
 
-    // 等待初始化完成（最多 5 秒）
-    let init_result = init_rx.recv_timeout(Duration::from_secs(5))
+    // 等待初始化完成（最多 10 秒）
+    let init_result = init_rx
+        .recv_timeout(Duration::from_secs(10))
         .map_err(|e| format!("等待 WASAPI 初始化超时: {e}"))?;
 
     match init_result {
-        InitResult::Success { sample_rate, sample_fmt } => {
-            Ok(StopHandle::new_speaker(stop_flag, sample_rate, sample_fmt))
-        }
+        InitResult::Success {
+            sample_rate,
+            sample_fmt,
+        } => Ok(StopHandle::new_speaker(stop_flag, sample_rate, sample_fmt)),
         InitResult::Failed(e) => Err(e),
     }
 }
@@ -97,35 +102,47 @@ pub fn record_speaker(
 unsafe fn wasapi_loopback_thread(
     tx: mpsc::Sender<Vec<f64>>,
     stop_flag: Arc<AtomicBool>,
-) -> Result<(u32, SampleFmt), String> {
+    init_tx: mpsc::Sender<InitResult>,
+) -> Result<(), String> {
     eprintln!("[WASAPI] wasapi_loopback_thread 开始执行");
 
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
     eprintln!("[WASAPI] 正在创建设备枚举器...");
-    let enumerator: IMMDeviceEnumerator =
-        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-            .map_err(|e| format!("创建设备枚举器失败: {e}"))?;
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        .map_err(|e| {
+        let msg = format!("创建设备枚举器失败: {e}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
     eprintln!("[WASAPI] 设备枚举器创建成功");
 
     eprintln!("[WASAPI] 正在获取默认渲染设备...");
     let device = enumerator
         .GetDefaultAudioEndpoint(eRender, eConsole)
-        .map_err(|e| format!("获取默认扬声器设备失败: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("获取默认扬声器设备失败: {e}");
+            let _ = init_tx.send(InitResult::Failed(msg.clone()));
+            msg
+        })?;
     eprintln!("[WASAPI] 获取默认渲染设备成功");
 
     eprintln!("[WASAPI] 正在激活音频客户端...");
-    let audio_client: IAudioClient = device
-        .Activate(CLSCTX_ALL, None)
-        .map_err(|e| format!("激活音频客户端失败: {e}"))?;
+    let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|e| {
+        let msg = format!("激活音频客户端失败: {e}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
     eprintln!("[WASAPI] 音频客户端激活成功");
 
     // 获取设备混音格式
     eprintln!("[WASAPI] 正在获取混音格式...");
-    let mix_format_ptr = audio_client
-        .GetMixFormat()
-        .map_err(|e| format!("获取设备混音格式失败: {e}"))?;
+    let mix_format_ptr = audio_client.GetMixFormat().map_err(|e| {
+        let msg = format!("获取设备混音格式失败: {e}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
     eprintln!("[WASAPI] 获取混音格式成功");
 
     let fmt = &*mix_format_ptr;
@@ -141,8 +158,7 @@ unsafe fn wasapi_loopback_thread(
         SampleFmt::F32
     } else if format_tag == 65534 {
         // WAVE_FORMAT_EXTENSIBLE，需要检查 SubFormat GUID
-        // 在 WAVEFORMATEXTENSIBLE 中，SubFormat 位于 offset 18（cbSize + wValidBitsPerSample 之后）
-        // IEEE_FLOAT GUID: {00000003-0000-0010-8000-00aa00389b71} (PCM 的 DATA1=1, FLOAT 的 DATA1=3)
+        // IEEE_FLOAT GUID: {00000003-0000-0010-8000-00aa00389b71}
         // 简化判断：32bit EXTENSIBLE 默认按 f32 处理（Windows 音频引擎默认）
         if bits_per_sample == 32 {
             SampleFmt::F32
@@ -157,8 +173,10 @@ unsafe fn wasapi_loopback_thread(
         SampleFmt::S32
     };
 
-    eprintln!("混音格式详情: {}Hz, {}bit, tag={}, channels={}",
-        sample_rate, bits_per_sample, format_tag, num_channels);
+    eprintln!(
+        "混音格式详情: {}Hz, {}bit, tag={}, channels={}",
+        sample_rate, bits_per_sample, format_tag, num_channels
+    );
 
     // 使用设备混音格式初始化（loopback 模式必须用混音格式）
     eprintln!("[WASAPI] 正在初始化音频客户端...");
@@ -171,21 +189,43 @@ unsafe fn wasapi_loopback_thread(
             mix_format_ptr,
             None,
         )
-        .map_err(|e| format!("初始化音频客户端失败: {e}"))?;
+        .map_err(|e| {
+            let msg = format!("初始化音频客户端失败: {e}");
+            let _ = init_tx.send(InitResult::Failed(msg.clone()));
+            msg
+        })?;
     eprintln!("[WASAPI] 音频客户端初始化成功");
 
     eprintln!("[WASAPI] 正在获取捕获客户端...");
-    let capture_client: IAudioCaptureClient = audio_client
-        .GetService()
-        .map_err(|e| format!("获取捕获客户端失败: {e}"))?;
+    let capture_client: IAudioCaptureClient = audio_client.GetService().map_err(|e| {
+        let msg = format!("获取捕获客户端失败: {e}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
     eprintln!("[WASAPI] 获取捕获客户端成功");
 
     eprintln!("[WASAPI] 正在启动音频捕获...");
-    audio_client
-        .Start()
-        .map_err(|e| format!("启动音频捕获失败: {e}"))?;
+    audio_client.Start().map_err(|e| {
+        let msg = format!("启动音频捕获失败: {e}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
     eprintln!("[WASAPI] 音频捕获已启动");
 
+    // 关键修复：在进入录制循环前，立即通知主线程初始化成功
+    // 之前的 bug 是 init_tx.send 在函数返回后才执行，
+    // 但 wasapi_loopback_thread 是无限循环不会返回，导致主线程超时
+    eprintln!(
+        "[WASAPI] 通知主线程初始化成功: {}Hz, {}",
+        sample_rate,
+        sample_fmt.as_str()
+    );
+    let _ = init_tx.send(InitResult::Success {
+        sample_rate,
+        sample_fmt,
+    });
+
+    // 录制循环
     while !stop_flag.load(Ordering::Relaxed) {
         let mut packet_size = capture_client
             .GetNextPacketSize()
@@ -252,5 +292,5 @@ unsafe fn wasapi_loopback_thread(
     // 释放混音格式内存
     CoTaskMemFree(Some(mix_format_ptr as *const _));
 
-    Ok((sample_rate, sample_fmt))
+    Ok(())
 }
