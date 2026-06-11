@@ -62,16 +62,6 @@ impl StopHandle {
         }
     }
 
-    /// 创建扬声器录制的停止句柄（带初始化状态监控）
-    pub fn new_speaker(stop_flag: Arc<AtomicBool>) -> Self {
-        Self {
-            stream: None,
-            stop_flag: Some(stop_flag),
-            status: Arc::new(AtomicU8::new(RecordStatus::Recording as u8)),
-            init_rx: None,
-        }
-    }
-
     /// 创建扬声器录制的停止句柄（带初始化状态接收器）
     pub fn new_speaker_with_status(
         stop_flag: Arc<AtomicBool>,
