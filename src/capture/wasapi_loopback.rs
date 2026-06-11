@@ -75,7 +75,8 @@ unsafe fn wasapi_loopback_thread(
 ) -> Result<(), String> {
     // 先用 cpal 验证设备名称是否存在
     if let Some(ref name) = device_name {
-        use cpal::HostTrait;
+        use cpal::traits::HostTrait;
+        use cpal::traits::DeviceTrait;
         let host = cpal::default_host();
         let name_lower = name.to_lowercase();
         let devices: Vec<_> = host.output_devices()
@@ -144,7 +145,7 @@ unsafe fn wasapi_loopback_thread(
     });
 
     // 配置客户端
-    let stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK.0 | AUDCLNT_STREAMFLAGS_NOPERSIST.0;
+    let stream_flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_NOPERSIST;
     let hns_buffer_duration = 10000000i64; // 1秒
     let hns_periodicity = 0i64;
 

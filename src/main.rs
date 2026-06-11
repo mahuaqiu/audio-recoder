@@ -364,7 +364,7 @@ fn print_usage() {
     eprintln!("  -d, --duration <SECS>     录制时长秒数 (默认: 120)");
     eprintln!("  -o, --output <PATH>       输出文件路径 (默认: recording.wav)");
     eprintln!("  -i, --device <NAME>       输入设备名称 (模糊匹配, 默认: 系统默认设备)");
-eprintln!("  -l, --list-devices        列出可用输入设备");
+    eprintln!("  -l, --list-devices        列出所有可用音频设备");
     eprintln!("  -b, --blocking            前台阻塞模式，等待录制完成 (默认: 后台运行)");
     eprintln!("  -h, --help                显示帮助信息");
     eprintln!();
