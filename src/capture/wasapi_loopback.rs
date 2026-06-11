@@ -232,7 +232,7 @@ unsafe fn wasapi_loopback_thread(
     });
 
     // 淡入淡出帧数（约 5ms）
-    let fade_frames = (sample_rate as usize) / 200;
+    let fade_frames = (sample_rate as usize) / 100;
     let silence_threshold = 0.001;
 
     let mut frames_written: u64 = 0;
