@@ -28,14 +28,21 @@ pub fn record_speaker(
     eprintln!("正在录制系统音频 (WASAPI loopback)...");
 
     thread::spawn(move || {
+        eprintln!("[WASAPI] 子线程启动，开始初始化...");
+
         // 在子线程中初始化 COM（STA 模式，WASAPI loopback 推荐）
         unsafe {
             use windows::Win32::System::Com::*;
+            eprintln!("[WASAPI] 正在初始化 COM...");
             let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             if hr.is_err() {
-                // COM 可能已经初始化过了，忽略
+                eprintln!("[WASAPI] COM 初始化失败或已初始化，hr={:?}", hr);
+            } else {
+                eprintln!("[WASAPI] COM 初始化成功");
             }
         }
+
+        eprintln!("[WASAPI] 准备调用 wasapi_loopback_thread...");
 
         // 用 catch_unwind 捕获子线程的 panic
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -72,6 +79,7 @@ pub fn record_speaker(
                 let _ = init_tx.send(InitResult::Failed(format!("子线程 panic: {}", msg)));
             }
         }
+        eprintln!("[WASAPI] 子线程结束");
     });
 
     // 等待初始化完成（最多 5 秒）
@@ -90,25 +98,35 @@ unsafe fn wasapi_loopback_thread(
     tx: mpsc::Sender<Vec<f64>>,
     stop_flag: Arc<AtomicBool>,
 ) -> Result<(u32, SampleFmt), String> {
+    eprintln!("[WASAPI] wasapi_loopback_thread 开始执行");
+
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
+    eprintln!("[WASAPI] 正在创建设备枚举器...");
     let enumerator: IMMDeviceEnumerator =
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
             .map_err(|e| format!("创建设备枚举器失败: {e}"))?;
+    eprintln!("[WASAPI] 设备枚举器创建成功");
 
+    eprintln!("[WASAPI] 正在获取默认渲染设备...");
     let device = enumerator
         .GetDefaultAudioEndpoint(eRender, eConsole)
         .map_err(|e| format!("获取默认扬声器设备失败: {e}"))?;
+    eprintln!("[WASAPI] 获取默认渲染设备成功");
 
+    eprintln!("[WASAPI] 正在激活音频客户端...");
     let audio_client: IAudioClient = device
         .Activate(CLSCTX_ALL, None)
         .map_err(|e| format!("激活音频客户端失败: {e}"))?;
+    eprintln!("[WASAPI] 音频客户端激活成功");
 
     // 获取设备混音格式
+    eprintln!("[WASAPI] 正在获取混音格式...");
     let mix_format_ptr = audio_client
         .GetMixFormat()
         .map_err(|e| format!("获取设备混音格式失败: {e}"))?;
+    eprintln!("[WASAPI] 获取混音格式成功");
 
     let fmt = &*mix_format_ptr;
     let sample_rate = fmt.nSamplesPerSec;
@@ -143,6 +161,7 @@ unsafe fn wasapi_loopback_thread(
         sample_rate, bits_per_sample, format_tag, num_channels);
 
     // 使用设备混音格式初始化（loopback 模式必须用混音格式）
+    eprintln!("[WASAPI] 正在初始化音频客户端...");
     audio_client
         .Initialize(
             AUDCLNT_SHAREMODE_SHARED,
@@ -153,6 +172,7 @@ unsafe fn wasapi_loopback_thread(
             None,
         )
         .map_err(|e| format!("初始化音频客户端失败: {e}"))?;
+    eprintln!("[WASAPI] 音频客户端初始化成功");
 
     let capture_client: IAudioCaptureClient = audio_client
         .GetService()
