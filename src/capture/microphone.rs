@@ -15,6 +15,17 @@ pub fn list_input_devices() -> Result<Vec<String>, String> {
     Ok(devices)
 }
 
+/// 列出所有可用的音频输出设备名称（扬声器/系统音频）
+pub fn list_output_devices() -> Result<Vec<String>, String> {
+    let host = cpal::default_host();
+    let devices: Vec<_> = host
+        .output_devices()
+        .map_err(|e| format!("枚举输出设备失败: {e}"))?
+        .filter_map(|d| d.name().ok())
+        .collect();
+    Ok(devices)
+}
+
 /// 根据名称模糊匹配查找输入设备
 /// 匹配规则：设备名称包含指定字符串（不区分大小写），返回第一个匹配的设备
 fn find_device_by_name(

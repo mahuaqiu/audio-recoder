@@ -56,22 +56,41 @@ fn main() {
     }
 }
 
-/// 列出可用音频输入设备
+/// 列出所有可用音频设备（输入+输出）
 fn list_devices() {
+    // 列出麦克风设备
     match capture::list_input_devices() {
         Ok(devices) => {
             if devices.is_empty() {
-                eprintln!("没有可用的输入设备");
+                eprintln!("没有可用的麦克风设备");
             } else {
-                eprintln!("可用输入设备:");
+                eprintln!("麦克风设备 (输入):");
                 for (i, name) in devices.iter().enumerate() {
                     eprintln!("  [{}] {}", i, name);
                 }
             }
         }
         Err(e) => {
-            eprintln!("错误: {e}");
-            std::process::exit(1);
+            eprintln!("枚举麦克风设备失败: {e}");
+        }
+    }
+    
+    eprintln!();
+    
+    // 列出扬声器设备
+    match capture::list_output_devices() {
+        Ok(devices) => {
+            if devices.is_empty() {
+                eprintln!("没有可用的扬声器设备");
+            } else {
+                eprintln!("扬声器设备 (输出):");
+                for (i, name) in devices.iter().enumerate() {
+                    eprintln!("  [{}] {}", i, name);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("枚举扬声器设备失败: {e}");
         }
     }
 }

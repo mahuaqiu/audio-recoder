@@ -19,6 +19,11 @@ pub fn list_input_devices() -> Result<Vec<String>, String> {
     microphone::list_input_devices()
 }
 
+/// 列出所有可用的音频输出设备
+pub fn list_output_devices() -> Result<Vec<String>, String> {
+    microphone::list_output_devices()
+}
+
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
