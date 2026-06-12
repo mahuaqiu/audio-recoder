@@ -135,6 +135,14 @@ fn run(config: RecordConfig) -> Result<(), String> {
         return Err("音频录制初始化失败".to_string());
     }
 
+    // 如果是后台子进程（stop_file 存在），在初始化成功后创建 pid_file
+    let stop_file = get_stop_file(&config.output_path);
+    let pid_file = get_pid_file(&config.output_path);
+    if stop_file.exists() {
+        fs::write(&pid_file, std::process::id().to_string())
+            .map_err(|e| format!("创建 PID 文件失败: {e}"))?;
+    }
+
     // 获取实际使用的采样率和格式（设备可能自动适配了）
     let actual_sample_rate = stop_handle.actual_sample_rate;
     let actual_sample_fmt = stop_handle.actual_sample_fmt;
@@ -164,7 +172,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
         )
     });
 
-    // 前台模式：阻塞等待录制完成
+    // 前台阻塞模式：阻塞等待录制完成
     let start = Instant::now();
     let duration = Duration::from_secs(config.duration_secs);
     let stop_file = get_stop_file(&config.output_path);
@@ -238,9 +246,34 @@ fn run_background(config: &RecordConfig) -> Result<(), String> {
     })?;
     let child_pid = child.id();
 
-    // 写入 PID 文件
-    fs::write(&pid_file, format!("{}", child_pid))
-        .map_err(|e| format!("写入 PID 文件失败: {e}"))?;
+    // 注意：pid_file 由子进程在成功初始化后创建
+    // 父进程等待子进程初始化完成（最多 10 秒）
+    let pid_file_clone = pid_file.clone();
+    let init_ok = std::thread::spawn(move || {
+        // 等待 pid_file 出现，表示子进程初始化成功
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(100));
+            if pid_file_clone.exists() {
+                // 读取 pid 验证
+                if let Ok(content) = fs::read_to_string(&pid_file_clone) {
+                    if let Ok(pid) = content.trim().parse::<u32>() {
+                        if pid == child_pid {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }).join().unwrap_or(false);
+
+    // 如果子进程初始化失败，清理并报错
+    if !init_ok {
+        // 子进程可能已经退出，清理停止文件
+        let _ = fs::remove_file(&stop_file);
+        let _ = fs::remove_file(&pid_file);
+        return Err("后台录制初始化失败，请检查设备名称是否正确".to_string());
+    }
 
     let source_name = match config.source {
         Source::Microphone => "麦克风",
