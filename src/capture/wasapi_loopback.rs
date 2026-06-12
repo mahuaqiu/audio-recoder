@@ -67,6 +67,36 @@ pub fn record_speaker(
     }
 }
 
+/// 检测样本块是否"有声音"（能量超过阈值）
+fn is_silent(samples: &[f64], threshold: f64) -> bool {
+    let sum: f64 = samples.iter().map(|s| s * s).sum();
+    let rms = (sum / samples.len() as f64).sqrt();
+    rms < threshold
+}
+
+/// 对样本应用淡入：开头 N 个样本从 0 渐变到 1
+fn fade_in(samples: &mut [f64], fade_frames: usize) {
+    let n = fade_frames.min(samples.len());
+    for (i, sample) in samples.iter_mut().enumerate() {
+        if i < n {
+            let gain = i as f64 / n as f64;
+            *sample *= gain;
+        }
+    }
+}
+
+/// 对样本应用淡出：最后 N 个样本从 1 渐变到 0
+fn fade_out(samples: &mut [f64], fade_frames: usize) {
+    let n = fade_frames.min(samples.len());
+    let len = samples.len();
+    for (i, sample) in samples.iter_mut().enumerate() {
+        if i >= len - n {
+            let gain = (len - i) as f64 / n as f64;
+            *sample *= gain;
+        }
+    }
+}
+
 unsafe fn wasapi_loopback_thread(
     tx: mpsc::Sender<Vec<f64>>,
     stop_flag: Arc<AtomicBool>,
@@ -135,13 +165,33 @@ unsafe fn wasapi_loopback_thread(
     let channels = mix_format.nChannels as u16;
     let sample_rate = mix_format.nSamplesPerSec as u32;
     let bits_per_sample = mix_format.wBitsPerSample as u16;
+    let format_tag = mix_format.wFormatTag;
 
-    eprintln!("[WASAPI] 格式: {}Hz, {}ch, {}bit", sample_rate, channels, bits_per_sample);
+    // 根据 format tag 和 bits_per_sample 判断实际采样格式
+    // format_tag == 3 => IEEE_FLOAT, 65534 => EXTENSIBLE (需看 bit depth)
+    let sample_fmt = if format_tag == 3 {
+        SampleFmt::F32
+    } else if format_tag == 65534 {
+        if bits_per_sample == 32 {
+            SampleFmt::F32
+        } else if bits_per_sample == 16 {
+            SampleFmt::S16
+        } else {
+            SampleFmt::S32
+        }
+    } else if bits_per_sample == 16 {
+        SampleFmt::S16
+    } else {
+        SampleFmt::S32
+    };
+
+    eprintln!("[WASAPI] 格式: {}Hz, {}ch, {}bit, tag={}, fmt={}",
+        sample_rate, channels, bits_per_sample, format_tag, sample_fmt.as_str());
 
     // 通知初始化成功
     let _ = init_tx.send(InitResult::Success {
         sample_rate,
-        sample_fmt: SampleFmt::F32,
+        sample_fmt,
     });
 
     // 配置客户端
@@ -155,7 +205,7 @@ unsafe fn wasapi_loopback_thread(
             stream_flags,
             hns_buffer_duration,
             hns_periodicity,
-            mix_format,
+            mix_format_ptr,
             None,
         )
         .map_err(|e| format!("初始化客户端失败: {e}"))?;
@@ -173,54 +223,103 @@ unsafe fn wasapi_loopback_thread(
     audio_client.Start().map_err(|e| format!("启动失败: {e}"))?;
     eprintln!("[WASAPI] 已启动");
 
-    let start = Instant::now();
-    let bytes_per_sample = (bits_per_sample / 8) as usize;
+    // 淡入淡出帧数（约 10ms）
+    let fade_frames = (sample_rate as usize) / 100;
+    let silence_threshold = 0.001;
+
+    let mut frames_written: u64 = 0;
+    let mut was_silent = true;
+    let start_time = Instant::now();
 
     while !stop_flag.load(Ordering::Relaxed) {
-        let packet_size = match capture_client.GetNextPacketSize() {
+        // 计算当前应该写入了多少帧（基于经过的时间）
+        let elapsed_secs = start_time.elapsed().as_secs_f64();
+        let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
+
+        // 如果时间轴落后，补齐静音帧
+        if expected_frames > frames_written {
+            let silence_frames = expected_frames - frames_written;
+            if silence_frames > 0 {
+                let silence = vec![0.0f64; silence_frames as usize];
+                let _ = tx.send(silence);
+                frames_written += silence_frames;
+                was_silent = true;
+            }
+        }
+
+        // 读取所有可用的数据包
+        let mut packet_size = match capture_client.GetNextPacketSize() {
             Ok(s) => s,
             Err(_) => break,
         };
 
-        if packet_size == 0 {
-            std::thread::sleep(Duration::from_millis(1));
-            continue;
-        }
+        while packet_size > 0 {
+            let mut data_ptr: *mut u8 = std::ptr::null_mut();
+            let mut num_frames: u32 = 0;
+            let mut flags: u32 = 0;
 
-        let mut data_ptr: *mut u8 = std::ptr::null_mut();
-        let mut num_frames: u32 = 0;
-        let mut flags: u32 = 0;
+            if let Err(e) = capture_client.GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None) {
+                eprintln!("[WASAPI] GetBuffer 失败: {:?}", e);
+                break;
+            }
 
-        if let Err(e) = capture_client.GetBuffer(&mut data_ptr, &mut num_frames, &mut flags, None, None) {
-            eprintln!("[WASAPI] GetBuffer 失败: {:?}", e);
-            break;
-        }
+            if num_frames > 0 && !data_ptr.is_null() {
+                // 根据 sample_fmt 读取数据，只取第一通道
+                let mut samples: Vec<f64> = match sample_fmt {
+                    SampleFmt::F32 => {
+                        let ptr = data_ptr as *const f32;
+                        (0..num_frames)
+                            .map(|i| ptr.add(i as usize * channels as usize).read() as f64)
+                            .collect()
+                    }
+                    SampleFmt::S16 => {
+                        let ptr = data_ptr as *const i16;
+                        (0..num_frames)
+                            .map(|i| ptr.add(i as usize * channels as usize).read() as f64 / 32768.0)
+                            .collect()
+                    }
+                    SampleFmt::S32 => {
+                        let ptr = data_ptr as *const i32;
+                        (0..num_frames)
+                            .map(|i| ptr.add(i as usize * channels as usize).read() as f64 / 2147483648.0)
+                            .collect()
+                    }
+                };
 
-        if num_frames > 0 && !data_ptr.is_null() {
-            let samples: Vec<f64> = match bits_per_sample {
-                32 => {
-                    let ptr = data_ptr as *const f32;
-                    (0..num_frames)
-                        .map(|i| ptr.add(i as usize * channels as usize).read() as f64)
-                        .collect()
+                let current_silent = is_silent(&samples, silence_threshold);
+
+                // 静音 → 有声音：淡入
+                if was_silent && !current_silent {
+                    fade_in(&mut samples, fade_frames);
                 }
-                16 => {
-                    let ptr = data_ptr as *const i16;
-                    (0..num_frames)
-                        .map(|i| ptr.add(i as usize * channels as usize).read() as f64 / 32768.0)
-                        .collect()
+                // 有声音 → 静音：淡出
+                else if !was_silent && current_silent {
+                    fade_out(&mut samples, fade_frames);
                 }
-                _ => {
-                    break;
-                }
+
+                let _ = tx.send(samples);
+                frames_written += num_frames as u64;
+                was_silent = current_silent;
+            }
+
+            let _ = capture_client.ReleaseBuffer(num_frames);
+
+            packet_size = match capture_client.GetNextPacketSize() {
+                Ok(s) => s,
+                Err(_) => break,
             };
-
-            // 只取第一通道
-            let mono: Vec<f64> = samples.iter().step_by(channels as usize).copied().collect();
-            let _ = tx.send(mono);
         }
 
-        let _ = capture_client.ReleaseBuffer(num_frames);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // 录制结束前补齐静音帧到当前时间
+    let elapsed_secs = start_time.elapsed().as_secs_f64();
+    let expected_frames = (elapsed_secs * sample_rate as f64) as u64;
+    if expected_frames > frames_written {
+        let silence_frames = expected_frames - frames_written;
+        let silence = vec![0.0f64; silence_frames as usize];
+        let _ = tx.send(silence);
     }
 
     eprintln!("[WASAPI] 停止");
