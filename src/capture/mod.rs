@@ -187,6 +187,8 @@ pub struct RecordConfig {
     pub device_name: Option<String>,
     /// 是否前台阻塞模式，false 则后台运行（默���）
     pub foreground: bool,
+    /// 是否启用 FSK 时间标记
+    pub timestamp_mark: bool,
 }
 
 impl Default for RecordConfig {
@@ -199,6 +201,7 @@ impl Default for RecordConfig {
             output_path: "recording.wav".into(),
             device_name: None,
             foreground: false, // 默认后台模式
+            timestamp_mark: false,
         }
     }
 }
