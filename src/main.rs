@@ -340,6 +340,28 @@ fn wav_writer_loop(
     let mut writer = hound::WavWriter::create(output_path, spec)
         .map_err(|e| format!("创建 WAV 文件失败: {e}"))?;
 
+    // 如果启用了时间标记，先写入标记样本
+    if let Some(millis) = mark_millis {
+        let marker_samples = fsk_marker::encode_timestamp(millis, target_rate);
+
+        for &sample in &marker_samples {
+            match target_fmt {
+                SampleFmt::S16 => {
+                    let s = (sample * 32767.0).clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+                    writer.write_sample(s).map_err(|e| format!("写入标记失败: {e}"))?;
+                }
+                SampleFmt::S32 => {
+                    let s = (sample * 2147483647.0).clamp(i32::MIN as f64, i32::MAX as f64) as i32;
+                    writer.write_sample(s).map_err(|e| format!("写入标记失败: {e}"))?;
+                }
+                SampleFmt::F32 => {
+                    let s = sample as f32;
+                    writer.write_sample(s).map_err(|e| format!("写入标记失败: {e}"))?;
+                }
+            }
+        }
+    }
+
     while let Ok(samples) = rx.recv() {
         // 重采样到目标采样率
         let resampled = if actual_rate != target_rate {
