@@ -1,5 +1,5 @@
 mod capture;
-mod fsk_marker;
+pub mod fsk_marker;
 
 use capture::{RecordConfig, SampleFmt, Source};
 use chrono::Timelike;

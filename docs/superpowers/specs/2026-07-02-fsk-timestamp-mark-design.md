@@ -204,4 +204,66 @@ fn goertzel(samples: &[f64], target_freq: f64, sample_rate: u32) -> f64 {
 
 ## 解码使用方式
 
-提供库函数 `fsk_marker::decode_timestamp(samples, sample_rate)`，并额外提供便捷函数 `fsk_marker::decode_from_wav(path)` 内部调用 hound 读取 WAV 并转换为 f64 后解码。用户可在 Rust 代码中调用这些函数。
+提供两个解码函数：
+
+| 函数 | 用途 |
+|------|------|
+| `decode_timestamp(samples: &[f64], sample_rate: u32) -> Option<u32>` | 从原始样本中解码 |
+| `decode_from_wav(path: &Path) -> Option<u32>` | 直接从 WAV 文件解码（便捷函数） |
+
+### 使用示例
+
+```rust
+use std::path::Path;
+use audio_recorder::fsk_marker;
+
+// 方式 1: 直接从 WAV 文件解码
+let path = Path::new("recording.wav");
+match fsk_marker::decode_from_wav(path) {
+    Some(millis) => {
+        // millis: 当天毫秒偏移量 (0 ~ 86399999)
+        let hours = millis / 3600000;
+        let mins = (millis % 3600000) / 60000;
+        let secs = (millis % 60000) / 1000;
+        let ms = millis % 1000;
+        println!("录音开始时间: {}:{:02}:{:02}.{:03}", hours, mins, secs, ms);
+    }
+    None => {
+        println!("未检测到有效的时间标记");
+    }
+}
+
+// 方式 2: 从原始样本解码（适用于自定义音频处理流程）
+let samples: Vec<f64> = /* 从音频数据获取 */;
+let sample_rate = 16000;
+match fsk_marker::decode_timestamp(&samples, sample_rate) {
+    Some(millis) => {
+        println!("时间戳: {} 毫秒", millis);
+    }
+    None => {
+        println!("解码失败");
+    }
+}
+```
+
+### 返回值说明
+
+- `Some(u32)`: 成功解码，返回当天毫秒偏移量 (0 ~ 86399999)
+- `None`: 解码失败，可能原因：
+  - 不是有效的 FSK 标记信号
+  - 前导码验证失败（汉明距离 > 1）
+  - 数据超出有效范围 (millis >= 86400000)
+  - WAV 文件太短（<1秒）
+  - 非单声道 WAV 文件（现在会输出警告）
+
+### 从解码结果获取时间
+
+```rust
+fn format_millis(millis: u32) -> String {
+    let hours = millis / 3600000;
+    let mins = (millis % 3600000) / 60000;
+    let secs = (millis % 60000) / 1000;
+    let ms = millis % 1000;
+    format!("{:02}:{:02}:{:02}.{:03}", hours, mins, secs, ms)
+}
+```
