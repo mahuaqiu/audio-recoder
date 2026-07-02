@@ -126,6 +126,20 @@ fn run(config: RecordConfig) -> Result<(), String> {
     // 创建 channel 用于音频数据传输
     let (tx, rx) = mpsc::channel();
 
+    // 获取时间戳（在录制启动之前，以减少延迟）
+    let mark_millis = if config.timestamp_mark {
+        if config.sample_rate < 16000 {
+            return Err("时间标记需要采样率 >= 16000Hz".to_string());
+        }
+        use chrono::Local;
+        let now = Local::now();
+        let secs = now.num_seconds_from_midnight();
+        let ms = now.timestamp_subsec_millis();
+        Some(secs as u32 * 1000 + ms as u32)
+    } else {
+        None
+    };
+
     // 启动录制
     let stop_handle = match config.source {
         Source::Microphone => capture::record_microphone(&config, tx)?,
@@ -161,20 +175,6 @@ fn run(config: RecordConfig) -> Result<(), String> {
             target_sample_fmt.as_str()
         );
     }
-
-    // 获取时间戳（如果启用）
-    let mark_millis = if config.timestamp_mark {
-        if config.sample_rate < 16000 {
-            return Err("时间标记需要采样率 >= 16000Hz".to_string());
-        }
-        use chrono::Local;
-        let now = Local::now();
-        let secs = now.num_seconds_from_midnight();
-        let ms = now.timestamp_subsec_millis();
-        Some(secs as u32 * 1000 + ms as u32)
-    } else {
-        None
-    };
 
     // 启动 WAV 写入线程
     let output_path = config.output_path.clone();
@@ -332,7 +332,7 @@ fn wav_writer_loop(
     target_fmt: SampleFmt,
     mark_millis: Option<u32>,
 ) -> Result<(), String> {
-    // 使用实际采样率写 WAV header，但用目标格式写数据
+    // 使用目标采样率写 WAV header（数据已被重采样到目标采样率）
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: target_rate,

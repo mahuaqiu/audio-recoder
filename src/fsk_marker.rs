@@ -71,6 +71,11 @@ fn generate_sine(freq: f64, num_samples: usize, sample_rate: u32) -> Vec<f64> {
 
 /// Goertzel 算法计算指定频率的能量
 fn goertzel(samples: &[f64], target_freq: f64, sample_rate: u32) -> f64 {
+    // 防御性检查：空输入返回 0.0
+    if samples.is_empty() {
+        return 0.0;
+    }
+
     let n = samples.len() as f64;
     let k = (n * target_freq / sample_rate as f64).round();
     let w = 2.0 * PI * k / n;
@@ -156,6 +161,12 @@ pub fn decode_from_wav(path: &Path) -> Option<u32> {
 
     let spec = reader.spec();
     let sample_rate = spec.sample_rate;
+
+    // 只支持单声道 WAV 文件
+    if spec.channels != 1 {
+        eprintln!("警告: decode_from_wav 只支持单声道 WAV，当前文件为 {} 声道", spec.channels);
+        return None;
+    }
 
     // 读取样本并转换为 f64
     let samples: Vec<f64> = match spec.sample_format {
