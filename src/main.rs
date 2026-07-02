@@ -2,6 +2,7 @@ mod capture;
 mod fsk_marker;
 
 use capture::{RecordConfig, SampleFmt, Source};
+use chrono::Timelike;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
@@ -161,6 +162,20 @@ fn run(config: RecordConfig) -> Result<(), String> {
         );
     }
 
+    // 获取时间戳（如果启用）
+    let mark_millis = if config.timestamp_mark {
+        if config.sample_rate < 16000 {
+            return Err("时间标记需要采样率 >= 16000Hz".to_string());
+        }
+        use chrono::Local;
+        let now = Local::now();
+        let secs = now.num_seconds_from_midnight();
+        let ms = now.timestamp_subsec_millis();
+        Some(secs as u32 * 1000 + ms as u32)
+    } else {
+        None
+    };
+
     // 启动 WAV 写入线程
     let output_path = config.output_path.clone();
     let writer_thread = std::thread::spawn(move || {
@@ -170,6 +185,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
             actual_sample_rate,
             target_sample_rate,
             target_sample_fmt,
+            mark_millis,
         )
     });
 
@@ -311,6 +327,7 @@ fn wav_writer_loop(
     actual_rate: u32,
     target_rate: u32,
     target_fmt: SampleFmt,
+    mark_millis: Option<u32>,
 ) -> Result<(), String> {
     // 使用实际采样率写 WAV header，但用目标格式写数据
     let spec = hound::WavSpec {
