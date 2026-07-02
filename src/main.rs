@@ -1,4 +1,5 @@
 mod capture;
+mod fsk_marker;
 
 use capture::{RecordConfig, SampleFmt, Source};
 use std::ffi::OsString;
@@ -399,6 +400,7 @@ fn print_usage() {
     eprintln!("  -i, --device <NAME>       输入设备名称 (模糊匹配, 默认: 系统默认设备)");
     eprintln!("  -l, --list-devices        列出所有可用音频设备");
     eprintln!("  -b, --blocking            前台阻塞模式，等待录制完成 (默认: 后台运行)");
+    eprintln!("  -t, --timestamp-mark      启用 FSK 时间标记");
     eprintln!("  -h, --help                显示帮助信息");
     eprintln!();
     eprintln!("示例:");
@@ -472,6 +474,9 @@ fn parse_args() -> Result<Action, String> {
             }
             Short('b') | Long("blocking") => {
                 config.foreground = true;
+            }
+            Short('t') | Long("timestamp-mark") => {
+                config.timestamp_mark = true;
             }
             Short('h') | Long("help") => {
                 print_usage();
