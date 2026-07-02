@@ -247,6 +247,9 @@ fn run_background(config: &RecordConfig) -> Result<(), String> {
     if let Some(ref name) = config.device_name {
         cmd.arg("-i").arg(name);
     }
+    if config.timestamp_mark {
+        cmd.arg("-t");
+    }
 
     // 子进程的标准输入/输出/错误分离，不阻塞父进程
     cmd.stdin(std::process::Stdio::null())
