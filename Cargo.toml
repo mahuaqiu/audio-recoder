@@ -8,6 +8,7 @@ cpal = "0.15"
 hound = "3.5"
 lexopt = "0.3"
 ctrlc = "3"
+chrono = "0.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
