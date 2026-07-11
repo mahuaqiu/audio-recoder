@@ -5,7 +5,7 @@ use capture::{RecordConfig, SampleFmt, Source};
 use chrono::Timelike;
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
@@ -216,15 +216,19 @@ fn run(config: RecordConfig) -> Result<(), String> {
     drop(stop_handle);
 
     // drop tx 已随 stop_handle drop 完成，channel 关闭后 writer 线程退出
-    let _ = writer_thread.join();
-
-    // 清理 PID 和停止文件
+    // 清理 PID 和停止文件（无论写入是否成功都清理）
     let _ = fs::remove_file(&pid_file);
     let _ = fs::remove_file(&stop_file);
 
-    eprintln!("录制完成: {}", config.output_path);
-
-    Ok(())
+    match writer_thread.join() {
+        Ok(Ok(())) => {
+            eprintln!("录制完成: {}", config.output_path);
+            Ok(())
+        }
+        // writer 线程返回的错误（如目录创建/写入失败）
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("WAV 写入线程异常退出".to_string()),
+    }
 }
 
 /// 后台模式：spawn 子进程以前台模式运行，父进程立即退出
@@ -339,6 +343,13 @@ fn wav_writer_loop(
         bits_per_sample: target_fmt.bits_per_sample(),
         sample_format: target_fmt.to_hound_sample_format(),
     };
+
+    // 自动创建输出目录（若父目录不存在）
+    if let Some(parent) = Path::new(output_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败: {e}"))?;
+        }
+    }
 
     let mut writer = hound::WavWriter::create(output_path, spec)
         .map_err(|e| format!("创建 WAV 文件失败: {e}"))?;
