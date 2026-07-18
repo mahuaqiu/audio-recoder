@@ -21,6 +21,7 @@ impl QpcUtcMapper {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn push_for_test(&mut self, cal: QpcUtcCalibration) {
         self.detect_jump_against_last(&cal);
         self.calibrations.push(cal);

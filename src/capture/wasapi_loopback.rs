@@ -315,11 +315,30 @@ unsafe fn resolve_render_device(
 }
 
 unsafe fn friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Result<String, String> {
-    // 用设备 ID 作为稳定标识（匹配可用 ID 子串）。
+    use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+    use windows::Win32::System::Com::*;
+
+    // 优先读友好名；失败则回退到设备 ID，保证 --device 仍可按 ID 匹配。
+    if let Ok(store) = device.OpenPropertyStore(STGM_READ) {
+        if let Ok(value) = store.GetValue(&PKEY_Device_FriendlyName) {
+            if let Ok(pwstr) = PropVariantToStringAlloc(&value) {
+                if let Ok(name) = pwstr.to_string() {
+                    CoTaskMemFree(Some(pwstr.0 as *const std::ffi::c_void));
+                    if !name.is_empty() {
+                        return Ok(name);
+                    }
+                } else {
+                    CoTaskMemFree(Some(pwstr.0 as *const std::ffi::c_void));
+                }
+            }
+        }
+    }
+
     let id = device
         .GetId()
         .map_err(|e| format!("读取设备 ID 失败: {e}"))?;
-    let name = unsafe { id.to_string() }.unwrap_or_else(|_| "unknown-device".into());
-    windows::Win32::System::Com::CoTaskMemFree(Some(id.0 as *const std::ffi::c_void));
+    let name = id.to_string().unwrap_or_else(|_| "unknown-device".into());
+    CoTaskMemFree(Some(id.0 as *const std::ffi::c_void));
     Ok(name)
 }
