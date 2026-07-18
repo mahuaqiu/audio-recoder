@@ -216,6 +216,8 @@ pub struct RecordConfig {
     pub require_time_sync: bool,
     /// 允许的最大绝对时钟偏差，单位为毫秒。
     pub max_clock_offset_ms: f64,
+    /// 同步报告最大有效期（秒），默认 600。
+    pub max_sync_report_age_secs: u64,
 }
 
 impl Default for RecordConfig {
@@ -232,6 +234,7 @@ impl Default for RecordConfig {
             time_sync_report: None,
             require_time_sync: false,
             max_clock_offset_ms: 5.0,
+            max_sync_report_age_secs: 600,
         }
     }
 }

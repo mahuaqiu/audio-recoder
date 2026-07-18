@@ -1,75 +1,32 @@
 mod capture;
 pub mod fsk_marker;
+mod timing;
 
 use capture::{CapturedPacket, RecordConfig, SampleFmt, Source};
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use timing::{
+    write_wav_and_sidecar_atomic, Discontinuity, QpcUtcMapper, TimeSyncSidecarV2, TimingAnchor,
+    TimingSidecarV2, ValidatedTimeSyncReport,
+};
 
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-#[derive(Debug, Deserialize)]
-struct TimeSyncReport {
-    status: String,
-    #[serde(default)]
-    ntp_server: Option<String>,
-    #[serde(default)]
-    max_abs_offset_ms: Option<f64>,
-    #[serde(default)]
-    median_offset_ms: Option<f64>,
-    #[serde(default)]
-    checked_at_unix_ns: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-struct TimingSidecar {
-    schema_version: u32,
-    clock_domain: &'static str,
-    source: &'static str,
-    wav_file: String,
-    sample_rate: u32,
-    actual_device_sample_rate: u32,
-    first_pcm_utc_unix_ns: i64,
-    first_pcm_millis_of_day: u32,
-    fsk_semantics: &'static str,
-    fsk_prefix_samples: usize,
-    anchors: Vec<TimingAnchor>,
-    discontinuities: Vec<Discontinuity>,
-    time_sync: Option<TimeSyncSidecar>,
-}
-
-#[derive(Debug, Serialize)]
-struct TimingAnchor {
-    wav_sample_index: u64,
-    device_position: u64,
-    qpc_100ns: u64,
-    utc_unix_ns: i64,
-}
-
-#[derive(Debug, Serialize)]
-struct Discontinuity {
-    wav_sample_index: u64,
-    device_position: Option<u64>,
-    flags: u32,
-    reason: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct TimeSyncSidecar {
-    server: Option<String>,
-    checked_at_unix_ns: Option<i64>,
-    status: String,
-    max_abs_offset_ms: Option<f64>,
-}
 
 enum Action {
     ListDevices,
     Record(RecordConfig),
+}
+
+fn now_unix_ns() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(0)
 }
 
 fn pid_file(output: &str) -> PathBuf {
@@ -135,7 +92,7 @@ fn run(config: RecordConfig) -> Result<(), String> {
     if !config.foreground {
         return run_background(&config);
     }
-    validate_time_sync(&config)?;
+    let validated_sync = validate_time_sync(&config)?;
     if config.timestamp_mark && config.source != Source::Speaker {
         return Err(
             "新 timing 协议只支持 Windows WASAPI speaker loopback，请使用 --source speaker".into(),
@@ -182,9 +139,15 @@ fn run(config: RecordConfig) -> Result<(), String> {
         );
     }
 
-    let started = std::time::Instant::now();
+    let mut mapper = QpcUtcMapper::new();
+    let recording_started_unix_ns = now_unix_ns();
+    if config.timestamp_mark {
+        mapper.capture("start")?;
+    }
+    let started = Instant::now();
     let source_rate = stop_handle.actual_sample_rate;
     let has_stop_marker = stop_marker.exists();
+    let mut last_cal = Instant::now();
     while started.elapsed() < Duration::from_secs(config.duration_secs)
         && !STOP_REQUESTED.load(Ordering::Relaxed)
     {
@@ -197,14 +160,30 @@ fn run(config: RecordConfig) -> Result<(), String> {
             eprintln!("\n检测到停止文件已删除，正在停止...");
             break;
         }
+        if config.timestamp_mark && last_cal.elapsed() >= Duration::from_secs(1) {
+            let _ = mapper.capture("periodic");
+            last_cal = Instant::now();
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
     eprintln!();
     drop(stop_handle);
     let _ = fs::remove_file(&pid_marker);
     let _ = fs::remove_file(&stop_marker);
+    if config.timestamp_mark {
+        mapper.capture("end")?;
+    }
+    let recording_ended_unix_ns = now_unix_ns();
     let packets: Vec<CapturedPacket> = rx.into_iter().collect();
-    write_recording(&config, packets, source_rate)
+    write_recording(
+        &config,
+        packets,
+        source_rate,
+        mapper,
+        validated_sync,
+        recording_started_unix_ns,
+        recording_ended_unix_ns,
+    )
 }
 
 fn run_background(config: &RecordConfig) -> Result<(), String> {
@@ -233,6 +212,10 @@ fn run_background(config: &RecordConfig) -> Result<(), String> {
     command.args([
         "--max-clock-offset",
         &config.max_clock_offset_ms.to_string(),
+    ]);
+    command.args([
+        "--max-sync-report-age",
+        &config.max_sync_report_age_secs.to_string(),
     ]);
     command
         .stdin(std::process::Stdio::null())
@@ -265,41 +248,33 @@ fn run_background(config: &RecordConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_time_sync(config: &RecordConfig) -> Result<(), String> {
+fn validate_time_sync(config: &RecordConfig) -> Result<Option<ValidatedTimeSyncReport>, String> {
     let Some(path) = &config.time_sync_report else {
         if config.timestamp_mark || config.require_time_sync {
             return Err("启用新 timing 协议时必须提供 --time-sync-report".into());
         }
-        return Ok(());
+        return Ok(None);
     };
-    let text = fs::read_to_string(path).map_err(|e| format!("读取时间同步报告失败: {e}"))?;
-    let report: TimeSyncReport =
-        serde_json::from_str(&text).map_err(|e| format!("解析时间同步报告失败: {e}"))?;
-    let offset = report
-        .max_abs_offset_ms
-        .or_else(|| report.median_offset_ms.map(f64::abs));
-    if (config.timestamp_mark || config.require_time_sync)
-        && report.status.to_lowercase() != "pass"
-    {
-        return Err(format!("时间同步报告状态不是 pass: {}", report.status));
+    if !(config.timestamp_mark || config.require_time_sync) {
+        return Ok(None);
     }
-    if let Some(value) = offset {
-        if !value.is_finite() || value > config.max_clock_offset_ms {
-            return Err(format!(
-                "时间同步偏差 {:.3}ms 超过阈值 {:.3}ms",
-                value, config.max_clock_offset_ms
-            ));
-        }
-    } else if config.timestamp_mark || config.require_time_sync {
-        return Err("时间同步报告没有可用的偏差字段".into());
-    }
-    Ok(())
+    let report = timing::load_and_validate_pre_sync(
+        Path::new(path),
+        config.max_clock_offset_ms,
+        config.max_sync_report_age_secs,
+        now_unix_ns(),
+    )?;
+    Ok(Some(report))
 }
 
 fn write_recording(
     config: &RecordConfig,
     packets: Vec<CapturedPacket>,
     source_rate: u32,
+    mapper: QpcUtcMapper,
+    validated_sync: Option<ValidatedTimeSyncReport>,
+    recording_started_unix_ns: i64,
+    recording_ended_unix_ns: i64,
 ) -> Result<(), String> {
     if packets.is_empty() {
         return Err("没有收到任何音频 packet".into());
@@ -311,9 +286,10 @@ fn write_recording(
     let (pcm, packet_offsets, first_qpc, _first_device, discontinuities) =
         collect_pcm(&packets, source_rate);
     let output_pcm = resample(&pcm, source_rate, actual_rate);
+
     let (first_utc_ns, first_millis) = if config.timestamp_mark {
         let qpc = first_qpc.ok_or("WASAPI 没有返回首个 PCM packet 的 QPC 时间")?;
-        let utc_ns = qpc_to_utc_ns(qpc)?;
+        let utc_ns = mapper.map_qpc_to_utc_ns(qpc)?;
         (utc_ns, millis_of_day(utc_ns))
     } else {
         (0, 0)
@@ -323,16 +299,14 @@ fn write_recording(
     } else {
         Vec::new()
     };
+
     let mut anchors = Vec::new();
     if config.timestamp_mark {
         for (packet, offset) in packets.iter().zip(packet_offsets.iter().copied()) {
             if let (Some(device_position), Some(qpc)) = (packet.device_position, packet.qpc_100ns) {
                 let wav_index =
                     (offset as f64 * actual_rate as f64 / source_rate as f64).round() as u64;
-                let utc_ns = qpc_to_utc_ns(qpc).unwrap_or_else(|_| {
-                    first_utc_ns
-                        + (wav_index as i128 * 1_000_000_000i128 / actual_rate as i128) as i64
-                });
+                let utc_ns = mapper.map_qpc_to_utc_ns(qpc)?;
                 anchors.push(TimingAnchor {
                     wav_sample_index: wav_index,
                     device_position,
@@ -344,52 +318,88 @@ fn write_recording(
         if anchors.is_empty() {
             return Err("没有可用的 WASAPI timing anchor".into());
         }
+        // 确保首 anchor 为真实 PCM 起点
+        if let Some(first) = anchors.first_mut() {
+            first.wav_sample_index = 0;
+        }
+        if mapper.clock_jump_detected() {
+            return Err("检测到墙钟跳变，不产出正式录音产物".into());
+        }
+        if mapper.calibrations().len() < 2 {
+            return Err("QPC/UTC 校准点不足（至少需要 start 与 end）".into());
+        }
     }
+
     let parent = Path::new(&config.output_path)
         .parent()
         .filter(|path| !path.as_os_str().is_empty());
     if let Some(parent) = parent {
         fs::create_dir_all(parent).map_err(|e| format!("创建输出目录失败: {e}"))?;
     }
+
+    let wav_path = PathBuf::from(&config.output_path);
+    let wav_partial = PathBuf::from(format!("{}.partial", config.output_path));
+    let _ = fs::remove_file(&wav_partial);
+    let _ = fs::remove_file(format!("{}.timing.json", config.output_path));
+
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: actual_rate,
         bits_per_sample: config.sample_fmt.bits_per_sample(),
         sample_format: config.sample_fmt.to_hound_sample_format(),
     };
-    let mut writer = hound::WavWriter::create(&config.output_path, spec)
-        .map_err(|e| format!("创建 WAV 失败: {e}"))?;
-    for sample in marker.iter().chain(output_pcm.iter()) {
-        write_sample(&mut writer, *sample, config.sample_fmt)?;
+    {
+        let mut writer = hound::WavWriter::create(&wav_partial, spec)
+            .map_err(|e| format!("创建 WAV partial 失败: {e}"))?;
+        for sample in marker.iter().chain(output_pcm.iter()) {
+            write_sample(&mut writer, *sample, config.sample_fmt)?;
+        }
+        writer
+            .finalize()
+            .map_err(|e| format!("完成 WAV 写入失败: {e}"))?;
     }
-    writer
-        .finalize()
-        .map_err(|e| format!("完成 WAV 写入失败: {e}"))?;
+
     if config.timestamp_mark {
-        let sidecar = TimingSidecar {
-            schema_version: 1,
+        let sync = validated_sync.ok_or("缺少已校验的时间同步报告")?;
+        let wav_file = wav_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("recording.wav")
+            .to_string();
+        let sidecar = TimingSidecarV2 {
+            schema_version: 2,
             clock_domain: "windows-utc-synchronized-by-ntp",
             source: "wasapi-loopback",
-            wav_file: config.output_path.clone(),
+            wav_file,
+            wav_sha256: String::new(),
             sample_rate: actual_rate,
             actual_device_sample_rate: source_rate,
+            device_id: None,
+            device_name: config.device_name.clone(),
             first_pcm_utc_unix_ns: first_utc_ns,
             first_pcm_millis_of_day: first_millis,
             fsk_semantics: "first_pcm_sample",
             fsk_prefix_samples: marker.len(),
+            recording_started_unix_ns,
+            recording_ended_unix_ns,
+            qpc_utc_calibrations: mapper.calibrations().to_vec(),
+            clock_jump_detected: mapper.clock_jump_detected(),
             anchors,
             discontinuities,
-            time_sync: load_time_sync(config.time_sync_report.as_deref())?,
+            time_sync: TimeSyncSidecarV2 {
+                schema_version: sync.schema_version,
+                report_kind: sync.report_kind,
+                server: sync.ntp_server,
+                checked_at_unix_ns: sync.checked_at_unix_ns,
+                status: sync.status,
+                max_abs_offset_ms: sync.max_abs_offset_ms,
+                median_offset_ms: sync.median_offset_ms,
+                rtt_p50_ms: sync.rtt_p50_ms,
+            },
         };
-        let path = format!("{}.timing.json", config.output_path);
-        let temp = format!("{path}.tmp-{}", std::process::id());
-        fs::write(
-            &temp,
-            serde_json::to_vec_pretty(&sidecar)
-                .map_err(|e| format!("生成 timing sidecar 失败: {e}"))?,
-        )
-        .map_err(|e| format!("写入 timing sidecar 失败: {e}"))?;
-        fs::rename(&temp, &path).map_err(|e| format!("替换 timing sidecar 失败: {e}"))?;
+        write_wav_and_sidecar_atomic(&wav_path, &wav_partial, sidecar)?;
+    } else {
+        fs::rename(&wav_partial, &wav_path).map_err(|e| format!("替换 WAV 失败: {e}"))?;
     }
     eprintln!("录制完成: {}", config.output_path);
     Ok(())
@@ -490,66 +500,9 @@ fn resample(samples: &[f64], from_rate: u32, to_rate: u32) -> Vec<f64> {
         .collect()
 }
 
-fn load_time_sync(path: Option<&str>) -> Result<Option<TimeSyncSidecar>, String> {
-    let Some(path) = path else {
-        return Ok(None);
-    };
-    let report: TimeSyncReport = serde_json::from_str(
-        &fs::read_to_string(path).map_err(|e| format!("读取时间同步报告失败: {e}"))?,
-    )
-    .map_err(|e| format!("解析时间同步报告失败: {e}"))?;
-    Ok(Some(TimeSyncSidecar {
-        server: report.ntp_server,
-        checked_at_unix_ns: report.checked_at_unix_ns,
-        status: report.status,
-        max_abs_offset_ms: report
-            .max_abs_offset_ms
-            .or_else(|| report.median_offset_ms.map(f64::abs)),
-    }))
-}
-
 fn millis_of_day(unix_ns: i64) -> u32 {
     let seconds = unix_ns.div_euclid(1_000_000_000).rem_euclid(86_400);
     (seconds * 1000 + unix_ns.rem_euclid(1_000_000_000) / 1_000_000) as u32
-}
-
-#[cfg(not(target_os = "windows"))]
-fn qpc_to_utc_ns(_: u64) -> Result<i64, String> {
-    Err("当前平台没有 WASAPI QPC 到 UTC 映射".into())
-}
-
-#[cfg(target_os = "windows")]
-fn qpc_to_utc_ns(qpc_100ns: u64) -> Result<i64, String> {
-    use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
-    use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
-    let mut frequency = 0i64;
-    unsafe {
-        QueryPerformanceFrequency(&mut frequency).map_err(|e| format!("获取 QPC 频率失败: {e}"))?;
-    }
-    let mut best: Option<(i64, i64)> = None;
-    for _ in 0..8 {
-        let mut before = 0i64;
-        let mut after = 0i64;
-        unsafe {
-            QueryPerformanceCounter(&mut before).map_err(|e| format!("读取 QPC 失败: {e}"))?;
-        }
-        let filetime = unsafe { GetSystemTimePreciseAsFileTime() };
-        unsafe {
-            QueryPerformanceCounter(&mut after).map_err(|e| format!("读取 QPC 失败: {e}"))?;
-        }
-        let span = after - before;
-        if best.map(|(old, _)| span < old).unwrap_or(true) {
-            let ft =
-                ((filetime.dwHighDateTime as u64) << 32 | filetime.dwLowDateTime as u64) as i128;
-            let unix_100ns = ft - 116444736000000000i128;
-            let midpoint_100ns =
-                ((before as i128 + after as i128) * 5_000_000i128 / frequency as i128) as i64;
-            best = Some((span, unix_100ns as i64 - midpoint_100ns));
-        }
-    }
-    let offset = best.ok_or("无法建立 QPC/UTC 映射")?.1 as i128;
-    let utc_100ns = qpc_100ns as i128 + offset;
-    i64::try_from(utc_100ns * 100).map_err(|_| "UTC 纳秒超出范围".into())
 }
 
 fn print_usage() {
@@ -566,6 +519,7 @@ fn print_usage() {
     eprintln!("      --time-sync-report <PATH>  时间同步报告");
     eprintln!("      --require-time-sync       要求同步报告通过");
     eprintln!("      --max-clock-offset <MS>   最大允许偏差，默认 5");
+    eprintln!("      --max-sync-report-age <S> 同步报告有效期秒，默认 600");
 }
 
 fn parse_args() -> Result<Action, String> {
@@ -612,6 +566,11 @@ fn parse_args() -> Result<Action, String> {
                 config.max_clock_offset_ms = value_of(&mut parser, "--max-clock-offset")?
                     .parse()
                     .map_err(|_| "无效时钟偏差阈值".to_string())?
+            }
+            Long("max-sync-report-age") => {
+                config.max_sync_report_age_secs = value_of(&mut parser, "--max-sync-report-age")?
+                    .parse()
+                    .map_err(|_| "无效同步报告有效期".to_string())?
             }
             Short('h') | Long("help") => {
                 print_usage();

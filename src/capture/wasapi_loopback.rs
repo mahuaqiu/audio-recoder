@@ -91,46 +91,32 @@ unsafe fn wasapi_loopback_thread(
     init_tx: mpsc::Sender<InitResult>,
     device_name: Option<String>,
 ) -> Result<(), String> {
-    if let Some(name) = &device_name {
-        use cpal::traits::{DeviceTrait, HostTrait};
-        let host = cpal::default_host();
-        let name_lower = name.to_lowercase();
-        let devices: Vec<String> = host
-            .output_devices()
-            .map_err(|error| format!("枚举输出设备失败: {error}"))?
-            .filter_map(|device| device.name().ok())
-            .collect();
-        if !devices
-            .iter()
-            .any(|device| device.to_lowercase().contains(&name_lower))
-        {
-            let list = devices
-                .iter()
-                .enumerate()
-                .map(|(index, device)| format!("  [{index}] {device}"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let error = format!("未找到输出设备 {name:?}\n可用设备:\n{list}");
-            let _ = init_tx.send(InitResult::Failed(error.clone()));
-            return Err(error);
-        }
-    }
-
     use windows::Win32::Media::Audio::*;
     use windows::Win32::System::Com::*;
 
     let enumerator: IMMDeviceEnumerator =
         CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
             .map_err(|error| format!("创建设备枚举器失败: {error}"))?;
-    let device = enumerator
-        .GetDefaultAudioEndpoint(eRender, eConsole)
-        .map_err(|error| format!("获取默认扬声器失败: {error}"))?;
+    let (device, friendly) = match resolve_render_device(&enumerator, device_name.as_deref()) {
+        Ok(v) => v,
+        Err(error) => {
+            let _ = init_tx.send(InitResult::Failed(error.clone()));
+            return Err(error);
+        }
+    };
+    eprintln!("[WASAPI] 使用输出设备: {friendly}");
     let audio_client: IAudioClient = device
         .Activate(CLSCTX_ALL, None)
-        .map_err(|error| format!("激活音频客户端失败: {error}"))?;
-    let mix_format_ptr = audio_client
-        .GetMixFormat()
-        .map_err(|error| format!("获取混音格式失败: {error}"))?;
+        .map_err(|error| {
+            let msg = format!("激活音频客户端失败: {error}");
+            let _ = init_tx.send(InitResult::Failed(msg.clone()));
+            msg
+        })?;
+    let mix_format_ptr = audio_client.GetMixFormat().map_err(|error| {
+        let msg = format!("获取混音格式失败: {error}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
     let mix_format = &*mix_format_ptr;
     let channels = mix_format.nChannels as u16;
     let sample_rate = mix_format.nSamplesPerSec as u32;
@@ -148,31 +134,42 @@ unsafe fn wasapi_loopback_thread(
         "[WASAPI] 格式: {sample_rate}Hz, {channels}ch, {bits_per_sample}bit, {}",
         sample_fmt.as_str()
     );
+
+    if let Err(error) = audio_client.Initialize(
+        AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
+        10_000_000,
+        0,
+        mix_format_ptr,
+        None,
+    ) {
+        let msg = format!("初始化 WASAPI 客户端失败: {error}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        return Err(msg);
+    }
+    let buffer_frames = audio_client.GetBufferSize().map_err(|error| {
+        let msg = format!("获取缓冲区大小失败: {error}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        msg
+    })?;
+    eprintln!("[WASAPI] 缓冲区: {buffer_frames} 帧");
+    let capture_client: IAudioCaptureClient =
+        audio_client.GetService::<IAudioCaptureClient>().map_err(|error| {
+            let msg = format!("获取捕获服务失败: {error}");
+            let _ = init_tx.send(InitResult::Failed(msg.clone()));
+            msg
+        })?;
+    if let Err(error) = audio_client.Start() {
+        let msg = format!("启动 WASAPI 失败: {error}");
+        let _ = init_tx.send(InitResult::Failed(msg.clone()));
+        return Err(msg);
+    }
+
+    // 仅在 Initialize/GetService/Start 全部成功后通知主线程
     let _ = init_tx.send(InitResult::Success {
         sample_rate,
         sample_fmt,
     });
-
-    audio_client
-        .Initialize(
-            AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_NOPERSIST,
-            10_000_000,
-            0,
-            mix_format_ptr,
-            None,
-        )
-        .map_err(|error| format!("初始化 WASAPI 客户端失败: {error}"))?;
-    let buffer_frames = audio_client
-        .GetBufferSize()
-        .map_err(|error| format!("获取缓冲区大小失败: {error}"))?;
-    eprintln!("[WASAPI] 缓冲区: {buffer_frames} 帧");
-    let capture_client: IAudioCaptureClient = audio_client
-        .GetService::<IAudioCaptureClient>()
-        .map_err(|error| format!("获取捕获服务失败: {error}"))?;
-    audio_client
-        .Start()
-        .map_err(|error| format!("启动 WASAPI 失败: {error}"))?;
 
     let fade_frames = (sample_rate as usize / 100).max(1);
     let mut was_silent = true;
@@ -251,4 +248,78 @@ unsafe fn wasapi_loopback_thread(
     let _ = audio_client.Stop();
     CoTaskMemFree(Some(mix_format_ptr as *mut std::ffi::c_void));
     Ok(())
+}
+
+unsafe fn resolve_render_device(
+    enumerator: &windows::Win32::Media::Audio::IMMDeviceEnumerator,
+    device_name: Option<&str>,
+) -> Result<(windows::Win32::Media::Audio::IMMDevice, String), String> {
+    use windows::Win32::Media::Audio::*;
+
+    if device_name.is_none() {
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|error| format!("获取默认扬声器失败: {error}"))?;
+        let name = friendly_name(&device).unwrap_or_else(|_| "default".into());
+        return Ok((device, name));
+    }
+
+    let needle = device_name.unwrap().to_lowercase();
+    let collection = enumerator
+        .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+        .map_err(|error| format!("枚举输出设备失败: {error}"))?;
+    let count = collection
+        .GetCount()
+        .map_err(|error| format!("读取设备数量失败: {error}"))?;
+
+    let mut matches: Vec<(IMMDevice, String)> = Vec::new();
+    let mut all_names: Vec<String> = Vec::new();
+    for index in 0..count {
+        let device = collection
+            .Item(index)
+            .map_err(|error| format!("读取设备 {index} 失败: {error}"))?;
+        let name = friendly_name(&device).unwrap_or_else(|_| format!("device-{index}"));
+        all_names.push(name.clone());
+        if name.to_lowercase().contains(&needle) {
+            matches.push((device, name));
+        }
+    }
+
+    match matches.len() {
+        0 => {
+            let list = all_names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| format!("  [{i}] {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(format!(
+                "未找到输出设备 {:?}\n可用设备:\n{list}",
+                device_name.unwrap()
+            ))
+        }
+        1 => Ok(matches.remove(0)),
+        _ => {
+            let list = matches
+                .iter()
+                .enumerate()
+                .map(|(i, (_, n))| format!("  [{i}] {n}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Err(format!(
+                "设备名称 {:?} 匹配到多个输出设备，请使用更具体的名称:\n{list}",
+                device_name.unwrap()
+            ))
+        }
+    }
+}
+
+unsafe fn friendly_name(device: &windows::Win32::Media::Audio::IMMDevice) -> Result<String, String> {
+    // 用设备 ID 作为稳定标识（匹配可用 ID 子串）。
+    let id = device
+        .GetId()
+        .map_err(|e| format!("读取设备 ID 失败: {e}"))?;
+    let name = unsafe { id.to_string() }.unwrap_or_else(|_| "unknown-device".into());
+    windows::Win32::System::Com::CoTaskMemFree(Some(id.0 as *const std::ffi::c_void));
+    Ok(name)
 }
