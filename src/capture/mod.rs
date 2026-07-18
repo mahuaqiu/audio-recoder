@@ -14,6 +14,27 @@ pub use wasapi_loopback::record_speaker;
 #[cfg(target_os = "macos")]
 pub use macos_speaker::record_speaker;
 
+/// 一段连续的捕获 PCM 及其设备时钟元数据。
+#[derive(Debug, Clone)]
+pub struct CapturedPacket {
+    pub samples: Vec<f64>,
+    pub device_position: Option<u64>,
+    /// WASAPI 返回的 QPC 时间，单位为 100ns。
+    pub qpc_100ns: Option<u64>,
+    pub flags: u32,
+}
+
+impl CapturedPacket {
+    pub fn samples(samples: Vec<f64>) -> Self {
+        Self {
+            samples,
+            device_position: None,
+            qpc_100ns: None,
+            flags: 0,
+        }
+    }
+}
+
 /// 列出所有可用的音频输入设备
 pub fn list_input_devices() -> Result<Vec<String>, String> {
     microphone::list_input_devices()
@@ -189,6 +210,12 @@ pub struct RecordConfig {
     pub foreground: bool,
     /// 是否启用 FSK 时间标记
     pub timestamp_mark: bool,
+    /// 每次录音前由 Windows 同步脚本生成的报告。
+    pub time_sync_report: Option<String>,
+    /// 是否要求同步报告必须通过阈值校验。
+    pub require_time_sync: bool,
+    /// 允许的最大绝对时钟偏差，单位为毫秒。
+    pub max_clock_offset_ms: f64,
 }
 
 impl Default for RecordConfig {
@@ -202,6 +229,9 @@ impl Default for RecordConfig {
             device_name: None,
             foreground: false, // 默认后台模式
             timestamp_mark: false,
+            time_sync_report: None,
+            require_time_sync: false,
+            max_clock_offset_ms: 5.0,
         }
     }
 }

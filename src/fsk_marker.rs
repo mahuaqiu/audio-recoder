@@ -2,9 +2,9 @@
 //!
 //! 在录音文件开头的静音区嵌入 FSK 时间标记，编码当天毫秒级时间戳。
 
+use hound::{SampleFormat, WavReader};
 use std::f64::consts::PI;
 use std::path::Path;
-use hound::{WavReader, SampleFormat};
 
 // === 常量 ===
 
@@ -12,12 +12,12 @@ use hound::{WavReader, SampleFormat};
 pub const MARK_DURATION_SECS: f64 = 0.9;
 
 /// FSK 参数
-pub const FSK_FREQ_0: f64 = 7000.0;   // '0' 对应频率
-pub const FSK_FREQ_1: f64 = 7500.0;   // '1' 对应频率
+pub const FSK_FREQ_0: f64 = 7000.0; // '0' 对应频率
+pub const FSK_FREQ_1: f64 = 7500.0; // '1' 对应频率
 pub const SYMBOL_DURATION_SECS: f64 = 0.020; // 每比特 20ms
-pub const PREAMBLE_BITS: usize = 8;   // 前导码 bit 数
-pub const DATA_BITS: usize = 27;      // 数据 bit 数
-pub const GUARD_DURATION: f64 = 0.2;  // 保护间隔（秒）
+pub const PREAMBLE_BITS: usize = 8; // 前导码 bit 数
+pub const DATA_BITS: usize = 27; // 数据 bit 数
+pub const GUARD_DURATION: f64 = 0.2; // 保护间隔（秒）
 pub const MARKER_AMPLITUDE: f64 = 0.001; // -60dBFS
 
 // === 编码 ===
@@ -164,31 +164,33 @@ pub fn decode_from_wav(path: &Path) -> Option<u32> {
 
     // 只支持单声道 WAV 文件
     if spec.channels != 1 {
-        eprintln!("警告: decode_from_wav 只支持单声道 WAV，当前文件为 {} 声道", spec.channels);
+        eprintln!(
+            "警告: decode_from_wav 只支持单声道 WAV，当前文件为 {} 声道",
+            spec.channels
+        );
         return None;
     }
 
     // 读取样本并转换为 f64
     let samples: Vec<f64> = match spec.sample_format {
-        SampleFormat::Int => {
-            match spec.bits_per_sample {
-                16 => reader.samples::<i16>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| s as f64 / 32768.0)
-                    .collect(),
-                32 => reader.samples::<i32>()
-                    .filter_map(|s| s.ok())
-                    .map(|s| s as f64 / 2147483648.0)
-                    .collect(),
-                _ => return None,
-            }
-        }
-        SampleFormat::Float => {
-            reader.samples::<f32>()
+        SampleFormat::Int => match spec.bits_per_sample {
+            16 => reader
+                .samples::<i16>()
                 .filter_map(|s| s.ok())
-                .map(|s| s as f64)
-                .collect()
-        }
+                .map(|s| s as f64 / 32768.0)
+                .collect(),
+            32 => reader
+                .samples::<i32>()
+                .filter_map(|s| s.ok())
+                .map(|s| s as f64 / 2147483648.0)
+                .collect(),
+            _ => return None,
+        },
+        SampleFormat::Float => reader
+            .samples::<f32>()
+            .filter_map(|s| s.ok())
+            .map(|s| s as f64)
+            .collect(),
     };
 
     // 至少需要 1 秒的样本
@@ -212,7 +214,8 @@ mod tests {
 
         // 验证长度（约 0.9s @ 16kHz = 14400 样本）
         let expected_len = ((PREAMBLE_BITS + DATA_BITS) as f64 * SYMBOL_DURATION_SECS
-            + GUARD_DURATION) * sample_rate as f64;
+            + GUARD_DURATION)
+            * sample_rate as f64;
         assert!((encoded.len() as f64 - expected_len).abs() < 10.0);
 
         // 解码验证

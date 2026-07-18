@@ -2,7 +2,7 @@
 //! 需要 macOS 13.0+ 和屏幕录制权限
 
 use crate::capture::InitStatus;
-use crate::capture::{RecordConfig, StopHandle};
+use crate::capture::{CapturedPacket, RecordConfig, StopHandle};
 use screencapturekit::prelude::*;
 use std::sync::mpsc;
 use std::sync::{Arc, AtomicBool};
@@ -13,7 +13,7 @@ use std::time::Duration;
 /// 注意：macOS 13.0+ 需要屏幕录制权限
 pub fn record_speaker(
     config: &RecordConfig,
-    tx: mpsc::Sender<Vec<f64>>,
+    tx: mpsc::Sender<CapturedPacket>,
 ) -> Result<StopHandle, String> {
     // 创建停止标志
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -92,7 +92,7 @@ pub fn record_speaker(
                                 .collect();
 
                             if !samples.is_empty() {
-                                let _ = tx_inner.send(samples);
+                                let _ = tx_inner.send(CapturedPacket::samples(samples));
                             }
                         }
                     }

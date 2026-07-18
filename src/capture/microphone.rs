@@ -1,5 +1,5 @@
 use crate::capture::StopHandle;
-use crate::capture::{RecordConfig, SampleFmt};
+use crate::capture::{CapturedPacket, RecordConfig, SampleFmt};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
 use std::sync::mpsc;
@@ -28,10 +28,7 @@ pub fn list_output_devices() -> Result<Vec<String>, String> {
 
 /// 根据名称模糊匹配查找输入设备
 /// 匹配规则：设备名称包含指定字符串（不区分大小写），返回第一个匹配的设备
-fn find_device_by_name(
-    host: &cpal::Host,
-    name: &str,
-) -> Result<cpal::Device, String> {
+fn find_device_by_name(host: &cpal::Host, name: &str) -> Result<cpal::Device, String> {
     let name_lower = name.to_lowercase();
     let mut devices: Vec<_> = host
         .input_devices()
@@ -54,17 +51,15 @@ fn find_device_by_name(
             let device_name = device.name().unwrap_or_default();
             eprintln!("匹配到设备: {}", device_name);
             // 从 devices 中取出匹配的设备（避免借用问题）
-            let idx = devices.iter().position(|d| {
-                d.name().map(|n| n == device_name).unwrap_or(false)
-            }).unwrap();
+            let idx = devices
+                .iter()
+                .position(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+                .unwrap();
             Ok(devices.remove(idx))
         }
         None => {
             // 列出所有可用设备供参考
-            let device_list: Vec<String> = devices
-                .iter()
-                .filter_map(|d| d.name().ok())
-                .collect();
+            let device_list: Vec<String> = devices.iter().filter_map(|d| d.name().ok()).collect();
             Err(format!(
                 "未找到名称包含 \"{}\" 的输入设备\n可用设备:\n{}",
                 name,
@@ -83,7 +78,7 @@ fn find_device_by_name(
 /// 采样数据通过 tx 发送，返回停止句柄
 pub fn record_microphone(
     config: &RecordConfig,
-    tx: mpsc::Sender<Vec<f64>>,
+    tx: mpsc::Sender<CapturedPacket>,
 ) -> Result<StopHandle, String> {
     let host = cpal::default_host();
 
@@ -145,7 +140,7 @@ pub fn record_microphone(
                         .step_by(num_channels)
                         .map(|&s| s as f64)
                         .collect();
-                    let _ = tx.send(samples);
+                    let _ = tx.send(CapturedPacket::samples(samples));
                 },
                 err_fn,
                 None,
@@ -161,7 +156,7 @@ pub fn record_microphone(
                         .step_by(num_channels)
                         .map(|&s| s as f64 / 32768.0)
                         .collect();
-                    let _ = tx.send(samples);
+                    let _ = tx.send(CapturedPacket::samples(samples));
                 },
                 err_fn,
                 None,
@@ -177,7 +172,7 @@ pub fn record_microphone(
                         .step_by(num_channels)
                         .map(|&s| s as f64 / 2147483648.0)
                         .collect();
-                    let _ = tx.send(samples);
+                    let _ = tx.send(CapturedPacket::samples(samples));
                 },
                 err_fn,
                 None,
