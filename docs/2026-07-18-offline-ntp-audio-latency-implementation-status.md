@@ -3,6 +3,7 @@
 ## 已完成
 
 - 宿主机脚本：`scripts/time-sync/install-chrony-server.sh`、`verify-chrony-server.sh`。
+- 宿主机安装脚本未指定 `--allow-cidr` 时默认允许所有 IPv4/IPv6 来源访问 UDP/123；显式指定后可限制为指定网段。
 - Windows 校时脚本：`scripts/time-sync/sync-windows-time.ps1`、`verify-windows-time.ps1`。
 - recorder 的 WASAPI loopback packet 携带 `device_position`、QPC 100ns 时间和 buffer flags。
 - 新 FSK 语义：FSK 数值表示 WAV 中 FSK 前缀之后第一帧真实 PCM 的统一墙钟毫秒时间。
@@ -21,7 +22,7 @@
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\time-sync\sync-windows-time.ps1 `
   -NtpServer 192.168.10.20 `
-  -Samples 20 `
+  -Samples 10 `
   -MaxOffsetMs 5 `
   -OutputPath .\time-sync-report.json
 ```

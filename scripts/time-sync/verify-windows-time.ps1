@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$NtpServer,
-    [int]$Samples = 20,
+    [int]$Samples = 10,
     [double]$MaxOffsetMs = 5.0,
     [string]$OutputPath = ".\time-sync-verify-report.json"
 )

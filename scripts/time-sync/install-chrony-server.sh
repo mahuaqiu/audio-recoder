@@ -9,6 +9,7 @@ readonly MANAGED_BEGIN="# BEGIN audio-latency managed block"
 readonly MANAGED_END="# END audio-latency managed block"
 
 ALLOW_CIDRS=()
+ALLOW_CIDRS_EXPLICIT=0
 BIND_ADDRESS=""
 LOCAL_STRATUM=8
 DRY_RUN=0
@@ -35,14 +36,13 @@ usage() {
     cat <<'EOF'
 用法：
   sudo bash install-chrony-server.sh \
-    --allow-cidr 192.168.10.0/24 \
-    [--allow-cidr 10.0.0.0/24] \
     [--bind-address 192.168.10.20] \
     [--local-stratum 8] \
+    [--allow-cidr 192.168.10.0/24] \
     [--dry-run]
 
 参数：
-  --allow-cidr CIDR       允许访问 NTP 的局域网网段，可重复指定，必填
+  --allow-cidr CIDR       允许访问 NTP 的网段，可重复指定；不传时开放所有 IPv4/IPv6 网段
   --bind-address IP       chrony 监听的宿主机 IP，可选
   --local-stratum N       离线本地时钟层级，1 到 15，默认 8
   --dry-run               只检查参数并打印计划，不安装或修改系统
@@ -65,6 +65,10 @@ parse_args() {
             --allow-cidr)
                 (($# >= 2)) || die "--allow-cidr 缺少参数"
                 validate_token "CIDR" "$2"
+                if ((ALLOW_CIDRS_EXPLICIT == 0)); then
+                    ALLOW_CIDRS=()
+                    ALLOW_CIDRS_EXPLICIT=1
+                fi
                 ALLOW_CIDRS+=("$2")
                 shift 2
                 ;;
@@ -95,13 +99,19 @@ parse_args() {
         esac
     done
 
-    ((${#ALLOW_CIDRS[@]} > 0)) || die "至少需要一个 --allow-cidr"
+    if ((${#ALLOW_CIDRS[@]} == 0)); then
+        ALLOW_CIDRS=("0.0.0.0/0" "::/0")
+    fi
     ((LOCAL_STRATUM >= 1 && LOCAL_STRATUM <= 15)) || die "--local-stratum 必须在 1 到 15 之间"
 }
 
 print_plan() {
     log "部署计划："
-    log "  允许网段: ${ALLOW_CIDRS[*]}"
+    if ((ALLOW_CIDRS_EXPLICIT)); then
+        log "  允许网段: ${ALLOW_CIDRS[*]}（按参数限制）"
+    else
+        log "  允许网段: ${ALLOW_CIDRS[*]}（默认开放所有 IPv4/IPv6 来源）"
+    fi
     log "  监听地址: ${BIND_ADDRESS:-由 chrony 默认监听}"
     log "  本地层级: $LOCAL_STRATUM"
     log "  操作范围: chrony 配置、chrony 服务、已启用的 firewalld/ufw"
@@ -269,10 +279,10 @@ configure_ufw() {
 
 configure_firewall() {
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        log "配置 firewalld，仅允许指定网段访问 UDP/123"
+        log "配置 firewalld，允许 ${ALLOW_CIDRS[*]} 访问 UDP/123"
         configure_firewalld
     elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q '^Status: active'; then
-        log "配置 ufw，仅允许指定网段访问 UDP/123"
+        log "配置 ufw，允许 ${ALLOW_CIDRS[*]} 访问 UDP/123"
         configure_ufw
     else
         warn "未检测到正在运行的 firewalld 或 ufw；未修改防火墙"

@@ -137,7 +137,7 @@ event_time = anchor.utc_time
 
 - chrony 安装在 `zq-platform` 的 Linux 宿主机，不安装在 FastAPI 容器中。
 - 不修改 `zq-platform` 的 FastAPI、PostgreSQL、Redis 或 Nginx 容器。
-- NTP 使用 UDP `123`，仅向指定局域网网段开放。
+- NTP 使用 UDP `123`。当前测试环境为内网，安装脚本默认向所有 IPv4/IPv6 来源开放；如需收紧，可显式指定局域网网段。
 - 无公网时启用 chrony local reference，使宿主机自身时钟成为局域网基准。
 - 生产部署前备份现有 chrony 配置，脚本需要支持重复执行。
 
@@ -157,7 +157,17 @@ scripts/time-sync/
 
 ### 5.3 安装脚本参数
 
-`install-chrony-server.sh` 建议接口：
+`install-chrony-server.sh` 接口：
+
+```bash
+sudo bash install-chrony-server.sh \
+  --bind-address 192.168.10.20 \
+  --local-stratum 8
+```
+
+上面的命令不指定 `--allow-cidr`，脚本会默认配置 `allow 0.0.0.0/0` 和 `allow ::/0`，并在已启用的 `firewalld` 或 `ufw` 中放行所有来源访问 UDP `123`。这适用于当前仅在内网使用的场景。
+
+如未来需要限制来源，可重复传入 `--allow-cidr`；传入后脚本只写入这些网段，例如：
 
 ```bash
 sudo bash install-chrony-server.sh \
@@ -170,7 +180,7 @@ sudo bash install-chrony-server.sh \
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
-| `--allow-cidr` | 是 | 允许访问 NTP 的测试网段，可重复指定 |
+| `--allow-cidr` | 否 | 允许访问 NTP 的网段，可重复指定；不传时默认开放所有 IPv4/IPv6 来源 |
 | `--bind-address` | 否 | NTP 监听地址；不指定时由 chrony 默认监听 |
 | `--local-stratum` | 否 | 离线本地时钟层级，默认 8 |
 | `--dry-run` | 否 | 只展示将执行的操作 |
@@ -184,7 +194,7 @@ sudo bash install-chrony-server.sh \
 5. 以带时间戳文件名备份原配置。
 6. 使用独立受管配置块写入配置，重复执行时替换该块而不是重复追加。
 7. 配置 `local stratum 8`，允许离线提供时间。
-8. 配置指定的 `allow <CIDR>`。
+8. 未指定网段时配置 `allow 0.0.0.0/0` 和 `allow ::/0`；指定 `--allow-cidr` 时只配置传入的 `allow <CIDR>`。
 9. 配置 `makestep 1.0 3` 和 `rtcsync`。
 10. 校验配置语法后再重启服务。
 11. 启用 `chronyd` 开机启动。
@@ -196,7 +206,8 @@ sudo bash install-chrony-server.sh \
 ```conf
 # BEGIN audio-latency managed block
 local stratum 8
-allow 192.168.10.0/24
+allow 0.0.0.0/0
+allow ::/0
 makestep 1.0 3
 rtcsync
 # END audio-latency managed block
@@ -208,11 +219,11 @@ rtcsync
 
 安装脚本只操作检测到且正在运行的防火墙，不能无条件修改系统安全策略。
 
-- `firewalld`：添加来源网段到 UDP 123 的永久规则。
-- `ufw`：添加来源网段到 UDP 123 的允许规则。
+- `firewalld`：添加所有来源或指定来源网段到 UDP 123 的永久规则。
+- `ufw`：添加所有来源或指定来源网段到 UDP 123 的允许规则。
 - 未检测到受支持防火墙时打印人工配置提示。
 
-所有规则必须限制来源网段，禁止直接开放给所有网络。
+当前内网方案默认直接开放所有 IPv4/IPv6 来源。若宿主机存在公网暴露风险，应显式传入 `--allow-cidr`，并同步收紧云安全组、上游防火墙等脚本未覆盖的网络策略。
 
 ### 5.5 宿主机验证脚本
 
@@ -584,7 +595,7 @@ audio-checker.exe `
 Set-ExecutionPolicy -Scope Process Bypass
 .\sync-windows-time.ps1 `
   -NtpServer 192.168.10.20 `
-  -Samples 20 `
+  -Samples 10 `
   -MaxOffsetMs 5 `
   -OutputPath .\time-sync-report.json
 ```
@@ -597,7 +608,7 @@ Restart-Service W32Time
 w32tm /resync /rediscover
 w32tm /query /source
 w32tm /query /status
-w32tm /stripchart /computer:192.168.10.20 /samples:20 /dataonly
+w32tm /stripchart /computer:192.168.10.20 /samples:10 /dataonly
 ```
 
 注意：`w32tm` 输出会受 Windows 显示语言影响。实现时应为中文和英文输出各加入测试样本；解析失败必须返回失败，不能默认为同步成功。
@@ -611,8 +622,8 @@ w32tm /stripchart /computer:192.168.10.20 /samples:20 /dataonly
   "computer_name": "SENDER-PC",
   "ntp_server": "192.168.10.20",
   "checked_at_unix_ns": 1784351999000000000,
-  "sample_count": 20,
-  "valid_sample_count": 20,
+  "sample_count": 10,
+  "valid_sample_count": 10,
   "median_offset_ms": 1.4,
   "max_abs_offset_ms": 2.8,
   "threshold_ms": 5.0,
@@ -628,7 +639,7 @@ w32tm /stripchart /computer:192.168.10.20 /samples:20 /dataonly
 # 1. 校时并生成报告
 .\sync-windows-time.ps1 `
   -NtpServer 192.168.10.20 `
-  -Samples 20 `
+  -Samples 10 `
   -MaxOffsetMs 5 `
   -OutputPath .\time-sync-report.json
 
@@ -659,7 +670,7 @@ if ($LASTEXITCODE -ne 0) {
 ```powershell
 .\verify-windows-time.ps1 `
   -NtpServer 192.168.10.20 `
-  -Samples 20 `
+  -Samples 10 `
   -MaxOffsetMs 5 `
   -OutputPath .\time-sync-post-report.json
 ```
@@ -692,7 +703,7 @@ if ($LASTEXITCODE -ne 0) {
 
 - 在无公网环境重启宿主机后 chrony 自动运行。
 - 两台 Windows 电脑均能从宿主机读取时间。
-- 非允许网段无法访问 UDP 123。
+- 未指定 `--allow-cidr` 时，所有可达 IPv4/IPv6 来源均可访问 UDP 123；显式指定网段时，再验证非允许来源被拒绝。
 
 ### 阶段 2：Windows 同步脚本
 
@@ -798,7 +809,7 @@ if ($LASTEXITCODE -ne 0) {
 
 - [ ] 确认 `zq-platform` 宿主机为 Linux，记录发行版。
 - [ ] 确认宿主机固定 IP。
-- [ ] 确认测试网段 CIDR。
+- [ ] 确认宿主机只位于内网，或准备通过 `--allow-cidr` 限制来源网段。
 - [ ] 执行 chrony 安装脚本。
 - [ ] 配置防火墙 UDP 123。
 - [ ] 重启宿主机后验证 chrony。
