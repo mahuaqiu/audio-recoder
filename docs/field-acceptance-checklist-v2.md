@@ -16,21 +16,19 @@
 
 ```powershell
 # 1. 录制前校时（管理员）
-.\scripts\time-sync\sync-windows-time.ps1 `
-  -NtpServer <宿主机IP> -Samples 10 -MaxOffsetMs 5 `
-  -OutputPath .\time-sync-report.json
+.\scripts\time-sync\sync-windows-time.ps1 <宿主机IP>
+# 默认报告：.\scripts\time-sync\time-sync-report.json
 
 # 2. 提前启动录音
 .\audio-recorder.exe -s speaker -r 16000 -f s16 -d 120 -o .\sender.wav `
-  -t --time-sync-report .\time-sync-report.json --require-time-sync -b
+  -t --time-sync-report .\scripts\time-sync\time-sync-report.json --require-time-sync -b
 # 接收端把 -o 改为 receiver.wav
 
 # 3. 播放固定测试音（至少 5 事件，间隔 3 至 5 秒）
 
 # 4. 停止录音后只读复检
-.\scripts\time-sync\verify-windows-time.ps1 `
-  -NtpServer <宿主机IP> -Samples 10 -MaxOffsetMs 5 `
-  -OutputPath .\time-sync-post-report.json
+.\scripts\time-sync\verify-windows-time.ps1 <宿主机IP>
+# 默认报告：.\scripts\time-sync\time-sync-verify-report.json
 
 # 5. 分析
 .\audio-checker.exe --sender .\sender.wav --receiver .\receiver.wav --count 5 --pretty

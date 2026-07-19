@@ -1,13 +1,18 @@
 ﻿[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, Position = 0)]
+    [ValidateNotNullOrEmpty()]
     [string]$NtpServer,
     [int]$Samples = 10,
     [double]$MaxOffsetMs = 5.0,
-    [string]$OutputPath = ".\time-sync-verify-report.json"
+    [string]$OutputPath
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = Join-Path $PSScriptRoot "time-sync-verify-report.json"
+}
 
 # 只读复检：禁止执行任何时间配置、服务重启或主动同步操作。
 

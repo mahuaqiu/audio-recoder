@@ -1,13 +1,18 @@
 ﻿[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, Position = 0)]
+    [ValidateNotNullOrEmpty()]
     [string]$NtpServer,
     [int]$Samples = 10,
     [double]$MaxOffsetMs = 5.0,
-    [string]$OutputPath = ".\time-sync-report.json"
+    [string]$OutputPath
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = Join-Path $PSScriptRoot "time-sync-report.json"
+}
 
 function Fail([string]$Message) {
     Write-Error $Message
