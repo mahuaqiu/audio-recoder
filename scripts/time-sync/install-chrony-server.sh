@@ -245,6 +245,13 @@ validate_chrony_config() {
         warn "chronyd 命令不存在"
         return 1
     fi
+
+    # chronyd 4.x 支持用 -p 解析并打印配置，部分旧版本没有该选项。
+    if ! chronyd -h 2>&1 | grep -Eq '(^|[[:space:],])-p([[:space:],]|$)'; then
+        warn "当前 chronyd 不支持 -p，跳过配置预校验；将通过服务重启结果校验配置"
+        return 0
+    fi
+
     log "校验 chrony 配置: $CONFIG_PATH"
     chronyd -p -f "$CONFIG_PATH" >/dev/null
 }
