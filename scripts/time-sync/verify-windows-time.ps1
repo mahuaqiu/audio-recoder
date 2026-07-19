@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$NtpServer,
@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# 只读复检：禁止调用 sync 脚本、/config、Restart-Service、/resync。
+# 只读复检：禁止执行任何时间配置、服务重启或主动同步操作。
 
 function Fail([string]$Message) {
     Write-Error $Message
