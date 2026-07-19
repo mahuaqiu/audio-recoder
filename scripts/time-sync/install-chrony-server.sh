@@ -223,6 +223,7 @@ write_managed_config() {
     {
         printf '\n%s\n' "$MANAGED_BEGIN"
         printf 'local stratum %s\n' "$LOCAL_STRATUM"
+        printf 'port 123\n'
         printf 'makestep 1.0 3\n'
         printf 'rtcsync\n'
         if [[ -n "$BIND_ADDRESS" ]]; then
@@ -312,10 +313,20 @@ check_udp_listener() {
         warn "缺少 ss 命令，无法检查 UDP 监听"
         return 1
     fi
-    if ! ss -H -lun | awk '$5 ~ /:123$/ { found = 1 } END { exit !found }'; then
-        warn "chrony 已启动，但未检测到 UDP/123 监听"
-        return 1
-    fi
+
+    # ss -lun 的第 4 列是本地监听地址，第 5 列是对端地址。
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        if ss -H -lun | awk '$4 ~ /:123$/ { found = 1 } END { exit !found }'; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    warn "chrony 已启动，但等待 5 秒后仍未检测到 UDP/123 监听"
+    ss -H -lun >&2 || true
+    systemctl status "$SERVICE_NAME" --no-pager >&2 || true
+    return 1
 }
 
 print_result() {
@@ -332,7 +343,7 @@ print_result() {
     log "服务名称: $SERVICE_NAME"
     log "NTP 地址: $server_hint"
     printf '\nWindows 管理员 PowerShell 下一步命令：\n'
-    printf '  w32tm /stripchart /computer:%s /samples:10 /dataonly\n' "$server_hint"
+    printf '  w32tm /stripchart /computer:%s /samples:3 /dataonly\n' "$server_hint"
     printf '\n建议继续执行：\n'
     printf '  sudo bash verify-chrony-server.sh --expected-address %s\n' "$server_hint"
 }

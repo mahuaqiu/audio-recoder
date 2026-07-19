@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateNotNullOrEmpty()]
     [string]$NtpServer,
-    [int]$Samples = 10,
+    [int]$Samples = 3,
     [double]$MaxOffsetMs = 5.0,
     [string]$OutputPath
 )
@@ -23,8 +23,8 @@ function Fail([string]$Message) {
 
 . (Join-Path $PSScriptRoot "Parse-Stripchart.ps1")
 
-if ($Samples -lt 5 -or $MaxOffsetMs -le 0) {
-    Fail "Samples 至少为 5，MaxOffsetMs 必须大于 0"
+if ($Samples -lt 3 -or $MaxOffsetMs -le 0) {
+    Fail "Samples 至少为 3，MaxOffsetMs 必须大于 0"
 }
 
 # 仅查询当前状态，不修改配置

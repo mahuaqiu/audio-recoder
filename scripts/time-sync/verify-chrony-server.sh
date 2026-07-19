@@ -66,7 +66,8 @@ check_expected_address() {
 check_listener() {
     command -v ss >/dev/null 2>&1 || die "缺少 ss 命令，无法检查 UDP 监听"
     local listeners
-    listeners="$(ss -H -lun | awk '$5 ~ /:123$/')"
+    # ss -lun 的第 4 列是本地监听地址，第 5 列是对端地址。
+    listeners="$(ss -H -lun | awk '$4 ~ /:123$/')"
     [[ -n "$listeners" ]] || die "未检测到 UDP/123 监听"
 
     log "UDP/123 监听正常："
@@ -111,7 +112,7 @@ main() {
     log "宿主机 chrony/NTP 检查通过"
     if [[ -n "$EXPECTED_ADDRESS" ]]; then
         printf '请在 Windows 管理员 PowerShell 继续验证：\n'
-        printf '  w32tm /stripchart /computer:%s /samples:10 /dataonly\n' "$EXPECTED_ADDRESS"
+        printf '  w32tm /stripchart /computer:%s /samples:3 /dataonly\n' "$EXPECTED_ADDRESS"
     fi
 }
 

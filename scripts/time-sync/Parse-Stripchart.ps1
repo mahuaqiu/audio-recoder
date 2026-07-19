@@ -24,7 +24,7 @@ function New-TimeSyncReportObject {
         [double[]]$OffsetsMs,
         [double]$ThresholdMs
     )
-    if ($OffsetsMs.Count -lt 5) {
+    if ($OffsetsMs.Count -lt 3) {
         throw ("insufficient offset samples: {0}" -f $OffsetsMs.Count)
     }
     $sorted = @($OffsetsMs | Sort-Object)

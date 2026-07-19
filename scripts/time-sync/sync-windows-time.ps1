@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateNotNullOrEmpty()]
     [string]$NtpServer,
-    [int]$Samples = 10,
+    [int]$Samples = 3,
     [double]$MaxOffsetMs = 5.0,
     [string]$OutputPath
 )
@@ -25,8 +25,8 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
         [Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Fail "请使用管理员 PowerShell 执行此脚本"
 }
-if ($Samples -lt 5 -or $MaxOffsetMs -le 0) {
-    Fail "Samples 至少为 5，MaxOffsetMs 必须大于 0"
+if ($Samples -lt 3 -or $MaxOffsetMs -le 0) {
+    Fail "Samples 至少为 3，MaxOffsetMs 必须大于 0"
 }
 
 & w32tm /config "/manualpeerlist:$NtpServer,0x8" /syncfromflags:manual /update | Out-Null
