@@ -16,7 +16,7 @@
 
 ```powershell
 # 1. 录制前校时（管理员）
-.\scripts\time-sync\sync-windows-time.ps1 <宿主机IP>
+.\scripts\time-sync\sync-windows-time.cmd <宿主机IP>
 # 默认报告：.\scripts\time-sync\time-sync-report.json
 
 # 2. 提前启动录音
@@ -27,7 +27,7 @@
 # 3. 播放固定测试音（至少 5 事件，间隔 3 至 5 秒）
 
 # 4. 停止录音后只读复检
-.\scripts\time-sync\verify-windows-time.ps1 <宿主机IP>
+.\scripts\time-sync\verify-windows-time.cmd <宿主机IP>
 # 默认报告：.\scripts\time-sync\time-sync-verify-report.json
 
 # 5. 分析
